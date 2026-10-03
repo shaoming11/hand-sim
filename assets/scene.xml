@@ -1,0 +1,93 @@
+<mujoco model="capturn_scene">
+  <include file="right_hand_mjx.xml"/>
+
+  <!-- Deviates from the Leap MJX scene (Euler/pyramidal): an elliptic cone with impratio=10 is
+       what Menagerie ships for this hand, and tangential/torsional friction fidelity is the whole
+       point of a twisting task. Warp-backend support is checked in scripts/check_parity.py. -->
+  <option timestep="0.005" integrator="implicitfast" cone="elliptic" impratio="10"
+          solver="Newton" iterations="10" ls_iterations="20"/>
+
+  <statistic center="0 0 0.2" extent="0.35" meansize="0.01"/>
+
+  <visual>
+    <headlight diffuse="0.8 0.8 0.8" ambient="0.2 0.2 0.2" specular="0.3 0.3 0.3"/>
+    <rgba force="1 0 0 1"/>
+    <global azimuth="140" elevation="-20"/>
+    <map force="0.01" stiffness="500"/>
+    <scale forcewidth="0.05" contactwidth="0.2" contactheight="0.1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.4 0.55" rgb2="0.05 0.07 0.1"
+             width="512" height="1024"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.25 0.28 0.32"
+             rgb2="0.18 0.21 0.25" markrgb="0.6 0.6 0.6" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="4 4" reflectance="0.1"/>
+    <material name="bottle_mat" rgba="0.35 0.55 0.75 0.45"/>
+    <material name="cap_mat" rgba="0.85 0.75 0.2 1"/>
+  </asset>
+
+  <worldbody>
+    <!-- Visual only: no table in this task, the bottle is held fixed in the air. -->
+    <geom name="floor" type="plane" pos="0 0 0" size="0 0 0.01" material="groundplane"
+          contype="0" conaffinity="0" group="1"/>
+    <camera name="front" pos="0.40 -0.30 0.32" xyaxes="0.600 0.800 0 -0.186 0.140 0.972"/>
+    <camera name="back" pos="-0.26 0.20 0.28" xyaxes="-0.609 -0.792 0 0.166 -0.127 0.978"/>
+    <camera name="cap" pos="0.21 -0.17 0.30" xyaxes="0.63 0.78 0 -0.35 0.28 0.90"/>
+
+    <!-- Neck lengthened from the PRD's starting value (12 mm half-height at z=0.102) to 20 mm at
+         z=0.11, which lifts the cap from 8 mm to 24 mm above the 32 mm-radius shoulder. At the
+         PRD values a fingertip on the cap wall sits 0.1 mm off the shoulder, leaving no room to
+         gait; 500 ml PET bottles have a ~40 mm neck anyway. See NOTES.md. -->
+    <body name="bottle" pos="0 0 0.09">
+      <geom name="bottle_body" type="cylinder" size="0.032 0.09" material="bottle_mat"/>
+      <geom name="bottle_neck" type="cylinder" size="0.013 0.02" pos="0 0 0.11" material="bottle_mat"/>
+      <body name="cap" pos="0 0 0.122">
+        <!-- solreffriction/solimpfriction are not cosmetic. At MuJoCo's defaults the frictionloss
+             constraint leaks: the cap creeps at ~5.9 deg/s under 0.01 N*m, a fifth of the thread
+             friction, which a gaiting policy could lean on instead of actually turning the cap.
+             These values cut the creep ~20x and leave breakaway exactly analytic -- see NOTES.md.
+             Stiffening further (dmin 0.999+) makes it worse, not better. -->
+        <joint name="cap_hinge" type="hinge" axis="0 0 1"
+               frictionloss="0.05" damping="0.002" armature="1e-4"
+               solreffriction="0.01 1" solimpfriction="0.99 0.999 0.001"/>
+        <!-- priority=1 so the cap's friction and condim govern every hand/cap contact, which makes
+             the DR friction knob actually bite (contact friction is otherwise an elementwise max). -->
+        <geom name="cap" type="cylinder" size="0.016 0.008" mass="0.004"
+              condim="4" priority="1" friction="1.0 0.01 0.001" material="cap_mat"/>
+        <site name="cap_site" pos="0 0 0" size="0.002" group="4" rgba="0 1 0 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <contact>
+    <!-- The cap is a sleeve over the neck, so it overlaps it by design. MuJoCo's filterparent
+         does NOT remove this pair: the bottle has no joint, so it welds to the world and the
+         parent/child filter skips world-welded parents. Without this exclude the cap sits 16 mm
+         inside the neck geom at every step. -->
+    <exclude body1="bottle" body2="cap"/>
+  </contact>
+
+  <sensor>
+    <!-- cap, in the palm frame (grasp_site rides on rh_palm) -->
+    <framepos name="cap_position" objtype="site" objname="cap_site" reftype="site" refname="grasp_site"/>
+    <framezaxis name="cap_axis" objtype="site" objname="cap_site" reftype="site" refname="grasp_site"/>
+    <!-- cap hinge state (hinge qpos does not wrap, so this is the cumulative angle) -->
+    <jointpos name="cap_angle" joint="cap_hinge"/>
+    <jointvel name="cap_angvel" joint="cap_hinge"/>
+    <!-- fingertips, relative to the cap -->
+    <framepos name="th_tip_position" objtype="site" objname="rh_th_tip" reftype="site" refname="cap_site"/>
+    <framepos name="ff_tip_position" objtype="site" objname="rh_ff_tip" reftype="site" refname="cap_site"/>
+    <framepos name="mf_tip_position" objtype="site" objname="rh_mf_tip" reftype="site" refname="cap_site"/>
+    <framepos name="rf_tip_position" objtype="site" objname="rh_rf_tip" reftype="site" refname="cap_site"/>
+    <framepos name="lf_tip_position" objtype="site" objname="rh_lf_tip" reftype="site" refname="cap_site"/>
+  </sensor>
+
+  <keyframe>
+    <!-- PREGRASP: fitted by scripts/fit_pregrasp.py. Do not hand-edit. -->
+    <key name="pregrasp"
+      qpos="-0.0777024 -0.590837 0.0590784 0.42598 0.839689 0.847792 0.269529 0.939685 0.602868 0.61867 -0.325671 0.453774 1.11759 1.13344 0.589344 0.168055 0.924324 0.97519 1.01279 -0.0521977 0.89325 0.126781 0.503538 0.38877 0"
+      ctrl="-0.092384 -0.631211 -0.0528827 0.890795 0.126995 0.506211 0.390306 0.0643751 0.417126 1.69127 0.273605 0.939585 1.22613 -0.332114 0.445662 2.25603 0.577058 0.170113 0.933799 1.99524"/>
+  </keyframe>
+</mujoco>
