@@ -5,7 +5,8 @@ milestone at a time; deviations, measured numbers and open questions live in
 [`NOTES.md`](NOTES.md).
 
 Status: **M0** (scene), **M1** (open-loop feasibility) and **M2** (MJX parity) done.
-M3 onwards needs a GPU box.
+**M3** (benchmark) is written and validated but unmeasured -- it needs the H100, so `num_envs`
+is not yet chosen. See the runbook in [`NOTES.md`](NOTES.md).
 
 ## Setup (Mac, CPU)
 
@@ -48,6 +49,22 @@ python3 scripts/check_parity.py --probe   # just naconmax / njmax
 `warp-lang` ships a CPU build, so MJX-Warp runs on the Mac -- slowly, but it is the real
 backend. `impl='jax'` cannot run this scene (no cylinder/mesh collisions).
 
+## On the GPU box
+
+```bash
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export MUJOCO_GL=egl
+python3 -c "import jax; print(jax.default_backend())"   # must print: gpu
+
+python3 scripts/squeeze_twist.py                        # regenerate the trajectory
+python3 scripts/check_parity.py                         # confirm M2 holds on CUDA
+python3 scripts/benchmark.py --out artifacts/bench.json # M3: steps/s vs num_envs
+python3 scripts/benchmark.py --sim-dt 0.005,0.0025,0.00125 --num-envs 8192
+```
+
+The last call settles the open question from M2: whether `sim_dt=0.00125` is affordable, or
+whether to fall back to `0.0025` at a ~14% systematic overestimate of cap rotation.
+
 ## Changing the scene
 
 The hand placement and the `pregrasp` keyframe are solved numerically, not hand-tuned. After any
@@ -73,7 +90,8 @@ python3 scripts/squeeze_twist.py --fingers th,ff     # the PRD's two-finger vers
 assets/shadow_hand/        pristine mujoco_menagerie right hand (commit feadf76), LICENSE kept
 assets/right_hand_mjx.xml  derived copy: fingertip sites, fitted mount, scene owns <option>
 assets/scene.xml           hand + fixed bottle + hinged cap, sensors, pregrasp keyframe
-scripts/                   fit_pregrasp, view_scene, squeeze_twist, check_parity, render
-tests/                     M0 scene checks, M1 gait checks, M2 parity checks
+scripts/                   fit_pregrasp, view_scene, squeeze_twist, check_parity,
+                           benchmark, render
+tests/                     M0 scene checks, M1 gait, M2 parity, M3 benchmark harness
 artifacts/                 generated trajectories and video (gitignored)
 ```

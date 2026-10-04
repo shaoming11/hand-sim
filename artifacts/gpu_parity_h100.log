@@ -1,0 +1,44 @@
+=== gait ===
+fingers=th+ff+mf  grip=0.25  twist=52 deg  release=8 mm  cycles=12x16 steps  wrist=frozen
+  cap rotation           +59.43 deg over 9.6 s (+6.2 deg/s)
+  per cycle              [ 4.1 13.5 19.9 24.  26.7 31.  40.9 44.8 47.4 49.1 50.7 59.4]
+  deepest penetration    -0.117 mm
+  steps touching bottle  0
+  mean cap contacts      3.83
+  all finite             True
+
+saved artifacts/squeeze_twist.npz  ctrl(192, 20) -- replayed by check_parity.py at M2
+=== PARITY ===
+  final cap angle +60.44 deg   nacon max 11   ncollision max 22   nefc max 71
+  deepest penetration -0.147 mm   (CPU -0.566 mm)
+  solver used up to 9 of 30 iterations
+  overflow flags: none
+
+buffer sizing at 2x headroom
+  naconmax >=   44 per world   (driven by ncollision=22, NOT ncon=12)
+  njmax    >=  150 per world   (nefc=71)
+  naconmax is a total across worlds, so a 8192-env training run needs naconmax = 360448
+  njmax is per world, so it stays 150
+
+--- M2 criteria ---
+
+  1. CPU MuJoCo vs MJX-warp
+    final angle   CPU   +59.43 deg   other   +60.44 deg   difference   1.7% of the CPU total
+    worst gap along the trajectory:   2.2% of the CPU final angle
+    PASS (tolerance 10%)
+
+  2. CPU at sim_dt=0.00125 vs sim_dt=0.000625
+    final angle   CPU   +59.43 deg   other   +59.06 deg   difference   0.6% of the CPU total
+    worst gap along the trajectory:   1.3% of the CPU final angle
+    PASS (tolerance 10%)
+
+  3. overflow and stability
+    ncollision 22/1024   nacon 11/1024   nefc 71/1024
+    buffer overflow: none
+    all qpos finite: CPU True, MJX True
+    PASS
+
+M2: PASS
+=== RUN_DONE ===
+
+[exited with code 0]

@@ -486,6 +486,80 @@ trusting the new pose.
 
 ---
 
+## M3 — benchmark
+
+**Status: the script is written and validated; the numbers are NOT measured.** `benchmark.py`
+needs a GPU and this machine has none, so `num_envs` is not yet chosen and M3 is not done. What
+follows is the harness, the runbook, and the decision rule to apply to the output.
+
+### Runbook for the H100
+
+```bash
+export XLA_PYTHON_CLIENT_PREALLOCATE=false   # else JAX takes the VRAM Warp needs
+export MUJOCO_GL=egl
+python3 -c "import jax; print(jax.default_backend())"   # must print: gpu
+
+python3 scripts/squeeze_twist.py                       # regenerate the trajectory
+python3 scripts/check_parity.py                        # confirm M2 holds on real Warp/CUDA
+python3 scripts/benchmark.py --out artifacts/bench.json
+python3 scripts/benchmark.py --sim-dt 0.005,0.0025,0.00125 --num-envs 8192
+```
+
+The second benchmark call is the one that settles the open M2 question: whether
+`sim_dt = 0.00125` is affordable, or whether to fall back to `0.0025` at a ~14% systematic
+overestimate of cap rotation.
+
+### What the harness does that a plain timing loop would not
+
+* **Scales `naconmax` by `num_envs`.** It is a total across worlds (M2), so the benchmark uses
+  `44 * num_envs` and `njmax = 150`. Getting this wrong does not crash: it silently overflows
+  the broadphase and still reports a throughput.
+* **Checks for overflow in every configuration** and marks the row `INVALID` if a *buffer*
+  overflowed, so an impossible number cannot be mistaken for a fast one. Solver and linesearch
+  limits are reported but do not invalidate: they cost accuracy, not correctness.
+* **Excludes compilation.** The first call compiles Warp kernels and traces XLA; that time is
+  reported in its own column and never counted as throughput.
+* **Replays the M1 gait by default** rather than random actions, so the contact load is
+  representative. `--actions random` is there for comparison.
+
+### Local smoke numbers — NOT throughput data
+
+warp-cpu on the M1, 4 envs, 6 timed control steps. Useful only as evidence the harness runs and
+that the columns are self-consistent:
+
+| sim_dt | substeps | ctrl steps/s | vs 0.005 |
+|---|---|---|---|
+| 0.005 | 10 | 24 | 1.00x |
+| 0.0025 | 20 | 14 | 1.65x |
+| 0.00125 | 40 | 8 | **2.86x** |
+
+Note the cost of M2's timestep fix comes out at **2.9x**, not the 4x the substep count implies,
+because per-step overhead dominates at 4 envs. On a GPU at 8192 envs the fixed overhead is
+amortised and the ratio should move toward 4x. **Do not quote 2.9x as the answer** -- it is a
+CPU artefact at a batch size nobody trains at.
+
+### How to choose `num_envs` from the output
+
+The PRD asks for 1024 / 4096 / 8192. Pick by this order:
+
+1. **Discard any row marked `INVALID`.** A buffer overflow makes the physics wrong, not just
+   slow.
+2. **Take the largest `num_envs` that still scales.** Throughput should grow close to linearly
+   with `num_envs` while the GPU is underfilled and then flatten. The right choice is at the
+   knee: the largest count before `sim steps/s` stops improving materially (say <15% gain from
+   doubling). Past the knee, more envs cost memory and wall-clock per PPO iteration without
+   buying throughput.
+3. **Sanity-check it against the PPO config.** Playground's `LeapCubeRotateZAxis` uses
+   `num_envs=8192`, `unroll_length=40`, `batch_size=256`, `num_minibatches=32`. A batch is
+   `num_envs * unroll_length` transitions, so changing `num_envs` changes the effective batch and
+   the PPO config should be revisited rather than inherited blindly.
+4. **Then re-decide `sim_dt`** with the second benchmark call, now that the cost is a measured
+   number rather than an estimate.
+
+Record the resulting table here and state the chosen `num_envs` with the reason.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
@@ -507,5 +581,10 @@ trusting the new pose.
   factor of 6, where before the timestep fix it looked like a factor of 4. The measured torque
   ceiling (0.157 N*m vs 0.05 N*m of thread friction) still says a trained policy can get there,
   but this should be checked against real policy numbers at M5 rather than assumed.
-- Is `sim_dt = 0.00125` affordable? It is 4x the PRD's substep count. Decide at M3 with GPU
-  throughput in hand; `sim_dt = 0.0025` is the fallback at a ~14% systematic error.
+- Is `sim_dt = 0.00125` affordable? It is 4x the PRD's substep count. **Still open** -- M3's
+  harness is ready but needs the H100. `sim_dt = 0.0025` is the fallback at a ~14% systematic
+  error. Run `benchmark.py --sim-dt 0.005,0.0025,0.00125 --num-envs 8192` to settle it.
+- What is `num_envs`? **Still open**, for the same reason. Decision rule is in the M3 section.
+- Does raising `iterations` to 30 cost anything on a GPU? On warp-cpu it does not, because the
+  solver exits early, but a SIMD batch pays for its worst world rather than its average one.
+  Compare `benchmark.py` with `iterations` at 30 and at 20 once the box is up.
