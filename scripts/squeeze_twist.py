@@ -44,9 +44,10 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from fit_pregrasp import actuator_to_qpos_map  # noqa: E402
-from view_scene import load  # noqa: E402
+from view_scene import cap_dimensions, load  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+CTRL_DT = 0.05  # 20 Hz, per the PRD env spec
 DEFAULT_OUT = ROOT / "artifacts" / "squeeze_twist.npz"
 
 FINGER_TIPS = {
@@ -87,10 +88,13 @@ class OpenLoopGait:
         self.tip_ids = [m.site(t).id for t in self.tips]
 
         self.cap_geom = m.geom("cap").id
-        self.cap_radius = float(m.geom_size[self.cap_geom, 0])
+        self.cap_radius, self.cap_half_h = cap_dimensions(m)
         self.cap_site = m.site("cap_site").id
         self.cap_qadr = int(m.joint("cap_hinge").qposadr[0])
         self.bottle_geoms = {m.geom("bottle_body").id, m.geom("bottle_neck").id}
+
+        # derived, not hardcoded: sim_dt changed at M2 and the trajectory must follow
+        self.n_substeps = int(round(CTRL_DT / m.opt.timestep))
 
         self.u0 = self.data.ctrl.copy()
         self.lo, self.hi = m.actuator_ctrlrange.T.copy()
@@ -249,8 +253,9 @@ class OpenLoopGait:
         return np.clip(q, self.q_lo, self.q_hi)
 
     # -- replay ------------------------------------------------------------------------
-    def rollout(self, ctrl: np.ndarray, n_substeps: int = 10) -> dict:
+    def rollout(self, ctrl: np.ndarray, n_substeps: int | None = None) -> dict:
         m = self.model
+        n_substeps = self.n_substeps if n_substeps is None else n_substeps
         d = mujoco.MjData(m)
         mujoco.mj_resetDataKeyframe(m, d, m.keyframe("pregrasp").id)
         angle = np.zeros(len(ctrl))
@@ -336,7 +341,7 @@ def main() -> None:
           f"twist={np.degrees(args.twist):.0f} deg  release={args.release*1e3:.0f} mm  "
           f"cycles={args.cycles}x{period} steps  "
           f"wrist={'free' if args.use_wrist else 'frozen'}")
-    secs = period * args.cycles * 0.05
+    secs = period * args.cycles * CTRL_DT
     print(f"  cap rotation           {res['total_deg']:+.2f} deg over {secs:.1f} s "
           f"({res['total_deg']/secs:+.1f} deg/s)")
     print(f"  per cycle              {np.array2string(per_cycle, precision=1)}")
@@ -349,7 +354,8 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         out, ctrl=ctrl, qpos=res["qpos"], cap_angle=res["angle"], fingers=np.array(fingers),
-        ctrl_dt=0.05, sim_dt=gait.model.opt.timestep, n_substeps=10, keyframe="pregrasp",
+        ctrl_dt=CTRL_DT, sim_dt=gait.model.opt.timestep, n_substeps=gait.n_substeps,
+        keyframe="pregrasp",
         grip=args.grip, twist=args.twist, release=args.release, cycles=args.cycles,
         phase_steps=np.array(phase_steps), grip_z=args.grip_z,
     )

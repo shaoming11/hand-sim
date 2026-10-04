@@ -236,10 +236,17 @@ friction 1.0 have ample headroom. The binding constraint will be grasp geometry,
 
 ## M1 — open-loop squeeze-and-twist
 
-`scripts/squeeze_twist.py`. **Result: the cap turns 89 deg in 9.6 s (9.3 deg/s) with thumb +
-first + middle, and 13.5 deg with the PRD's literal thumb-and-first pair.** The milestone's bar
-was "a few degrees", so this clears it by a wide margin. Rotation is monotonic -- the cap holds
-its angle through each release phase rather than springing back.
+`scripts/squeeze_twist.py`. **Result: the cap turns 59.4 deg in 9.6 s (6.2 deg/s) with thumb +
+first + middle.** The milestone's bar was "a few degrees", so this clears it by a wide margin.
+Rotation is monotonic -- the cap holds its angle through each release phase rather than
+springing back.
+
+> **Numbers below were re-measured after M2.** M1 originally reported 89 deg, at the PRD's
+> `sim_dt=0.005`. M2 showed that timestep is not converged and inflates cap rotation by 48%; at
+> the corrected `sim_dt=0.00125` the same gait gets 59.4 deg, with fingertip penetration down
+> from -0.68 mm to -0.117 mm. The qualitative findings in this section are unchanged -- they were
+> all re-checked at the new timestep -- but any absolute number quoted here predates that fix
+> unless stated otherwise.
 
 ### The hand has no forearm roll
 
@@ -339,6 +346,146 @@ assuming 4*pi is comfortably reachable.
 
 ---
 
+## M2 — MJX port and parity
+
+`scripts/check_parity.py`. **All three criteria pass**, but getting there changed the scene
+three times. Final numbers, 192 control steps of the M1 gait:
+
+| | CPU MuJoCo | MJX-Warp |
+|---|---|---|
+| final cap angle | +59.43 deg | +61.61 deg (**3.7%**) |
+| deepest fingertip penetration | -0.566 mm | -0.109 mm |
+| contacts / constraints | ncon 12, nefc 75 | nacon 11, nefc 71 |
+| overflow flags | — | **none** |
+| solver iterations used | — | 8 of 30 |
+
+1. CPU vs MJX-Warp: **3.7%** (bar: ~10%). PASS
+2. halving `sim_dt`: **0.6%**. PASS
+3. no contact or constraint overflow, all qpos finite. PASS
+
+### Warp runs on the Mac
+
+`warp-lang` ships a CPU build, so `impl='warp'` works on an M1 without CUDA -- slowly (about
+75 s for a 9.6 s rollout, most of it one-off kernel compilation), but it is the real backend.
+Everything in this section was measured locally; re-run on the H100 to confirm.
+
+**`impl='jax'` cannot run this scene at all**: `NotImplementedError: (mjGEOM_CYLINDER,
+mjGEOM_MESH) collisions not implemented`. Every fingertip is a mesh. So the PRD's suggestion to
+smoke-test env logic locally with `impl='jax'` does not apply here -- use warp-cpu instead.
+
+### `naconmax` must be sized from `ncollision`, not from `ncon`
+
+This is the trap in the PRD's "set `naconmax`/`njmax` from measured counts with 2x headroom".
+CPU `ncon` peaks at 12; Warp's broadphase buffer is sized by `naconmax` and emits *candidate
+pairs*, which peak at **22**. Sizing from the CPU contact count overflows the broadphase on
+essentially every step, silently, while still producing plausible-looking output.
+
+| quantity | measured max | with 2x headroom |
+|---|---|---|
+| `ncollision` (warp broadphase candidates) | 22 | **naconmax >= 44 per world** |
+| `nacon` / `ncon` (actual contacts) | 11 / 12 | — |
+| `nefc` (constraints) | 75 | **njmax >= 150** |
+
+`naconmax` is a total across worlds, so an 8192-env run needs `naconmax = 360448`; `njmax` is
+per world and stays 150. (Confirms the PRD's guess about which one scales.)
+
+### Overflow is readable from the Data, not from stderr
+
+Warp prints its warnings from inside kernels, so Python cannot capture them. `data._impl`
+carries the same information and more: `overflow` is an `OverflowType` bitmask, `solver_niter`
+is how many iterations the step actually used, `ncollision`/`nacon`/`nefc` are the live counts,
+and contacts are flattened as `contact__dist`, `contact__geom`, ... (there is **no**
+`data._impl.contact`). `check_parity.py` reads all of these.
+
+### Three scene changes this milestone forced
+
+**1. `iterations` 10 -> 30, `ls_iterations` 20 -> 50.** CPU MuJoCo converges happily at 10/20.
+Warp does not: it reported `ITERATIONS` and `LS_ITERATIONS` overflow on roughly one step in six
+(337 linesearch and 121 solver warnings in a single 9.6 s rollout).
+
+| iterations / ls | overflow flags | max solver_niter | cap angle | wall time |
+|---|---|---|---|---|
+| 10 / 20 | EPA_HORIZON, **ITERATIONS, LS_ITERATIONS** | 10 (capped) | 34.29 deg | 11 s |
+| 20 / 30 | EPA_HORIZON | 13 | 34.48 | 13 s |
+| 30 / 50 (chosen) | EPA_HORIZON | 13 | 34.48 | 11 s |
+| 100 / 100 | EPA_HORIZON | 13 | 34.48 | 13 s |
+
+It converges in 13 iterations and costs nothing to allow 30, because the solver exits early.
+Re-measure on the GPU at M3: a SIMD batch pays for its worst world, not its average one.
+
+**2. The cap is now a 16-sided convex mesh, not a cylinder.** The PRD offered this swap for
+geom-pair support; the real reason is accuracy. Against a cylinder, Warp's convex collision
+overflows its EPA horizon buffer -- `MJ_MAX_EPAHORIZON`, a compile-time 24 entries with no model
+knob -- and falls back to a less accurate penetration normal, on every step of every env.
+
+| cap geom | CPU | Warp | parity | ncollision | penetration | overflow |
+|---|---|---|---|---|---|---|
+| cylinder | 34.36 deg | 34.48 deg | 0.3% | 21 | -0.735 mm | **EPA_HORIZON** |
+| 16-sided prism | 37.54 | 38.34 | 2.2% | 21 | -0.689 mm | **none** |
+
+Same cost, slightly less penetration, flag gone. A faceted cap is arguably the more honest model
+anyway -- real bottle caps are knurled. Note `geom_size` is all zeros for a mesh geom, and the
+compiler re-frames mesh vertices (this prism comes back with its axis along x), so
+`view_scene.cap_dimensions()` is now the single place that knows the cap's radius.
+
+**3. `sim_dt` 0.005 -> 0.00125. This is the big one.**
+
+The PRD's `sim_dt = 0.005` is not converged. Cap rotation at fixed `ctrl_dt = 0.05`:
+
+| sim_dt | substeps | cap angle | change vs previous | penetration |
+|---|---|---|---|---|
+| 0.005 (PRD) | 10 | 87.98 deg | — | -1.209 mm |
+| 0.0025 | 20 | 67.20 | 23.6% | -0.740 |
+| **0.00125 (chosen)** | **40** | **59.43** | **11.6%** | **-0.566** |
+| 0.000625 | 80 | 59.09 | **0.6%** | -0.530 |
+
+**At the PRD's timestep the hand gets 48% more cap rotation than the physics actually allows.**
+The cause is that the contact `solref` timeconst is 0.005 s -- exactly one step at `sim_dt=0.005`
+-- so the integrator overshoots into contact and the fingers get grip they have not earned.
+
+This is discretisation error, not chaos: perturbing the starting hand pose by 1e-5 rad changes
+the outcome by **0.5%**, and by 1e-9 rad by 0.2%. The scene is well behaved; the timestep was
+simply too coarse.
+
+Two cheaper fixes were tried and rejected:
+
+* **Soften the contacts.** `solref` timeconst 0.04 makes the result timestep-independent (0.5%
+  between 0.005 and 0.00125) -- by letting fingertips sink **4 mm** into the cap. It buys
+  convergence by destroying the thing M1 fixed.
+* **Raise the cap armature.** 1e-3 improves the 0.0025 -> 0.00125 drift from 13.1% to 6.1%, but
+  does not reach convergence and suppresses rotation (59 -> 46 deg) with fictitious inertia.
+
+| solref timeconst | 0.005 | 0.0025 | 0.00125 | 0.005 vs converged |
+|---|---|---|---|---|
+| 0.005 (chosen) | 87.98 [-1.21 mm] | 67.20 [-0.74] | 59.43 [-0.57] | **48.0%** |
+| 0.01 | 87.98 [-1.21] | 65.36 [-1.22] | 60.40 [-1.14] | 45.7% |
+| 0.02 | 80.80 [-2.52] | 67.93 [-2.44] | 66.29 [-2.17] | 21.9% |
+| 0.04 | 84.88 [-4.69] | 83.98 [-4.24] | 84.46 [-3.92] | 0.5% |
+
+**Cost: 4x the substeps per control step (10 -> 40).** This is a real training-budget decision
+and is worth revisiting at M3 against measured GPU throughput. Dropping back to `sim_dt=0.0025`
+halves the cost for a ~14% systematic overestimate of rotation -- far better than the PRD's 48%,
+and defensible if throughput turns out to be the binding constraint. `sim_dt=0.005` is not
+defensible.
+
+### The pregrasp fit is a proxy, and it bit
+
+Re-fitting the pregrasp for the prism cap produced a pose that scored *better* on the fitter's
+objective (tripod spread 108/125/127 deg, versus 99/111/150) and gaited at **5 deg where the
+previous pose gets 88**. The difference: the new fit left the thumb **0.7 mm** off the cap wall.
+A fingertip that starts already loaded cannot squeeze, so the grip phase does nothing.
+
+Grafting the M1 mount and keyframe onto the prism scene gives 88.0 deg, which is how we know the
+cap shape was not at fault. `fit_pregrasp.py` now carries an asymmetric `MIN_STANDOFF` floor so
+a tip cannot start closer than 2 mm, and `tests/test_parity.py::test_pregrasp_leaves_room_to_squeeze`
+pins it.
+
+The general lesson: **the fitter's objective is a proxy for gaiting quality, not a measure of
+it.** After any `fit_pregrasp.py --write`, run `squeeze_twist.py` and check the rotation before
+trusting the new pose.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
@@ -348,8 +495,17 @@ assuming 4*pi is comfortably reachable.
 - Fixed-tendon actuators (`rh_A_*J0`) under Warp.
 - The hand keeps Menagerie's default self-collision. 66 geoms total. Prune only if M3 shows
   throughput is poor (PRD).
-- Does Warp honour `ccd_iterations`/`ccd_tolerance`, and what do they cost in throughput? M1
-  needs 50/1e-8 on CPU to keep fingertips out of the cap; if Warp caps or ignores them, expect
-  deeper penetration on the GPU than on the Mac, and `check_parity.py` should catch it.
-- Is 4*pi in 20 s the right success threshold? The open-loop gait reaches a quarter of that
-  speed. Revisit at M5 with measured policy numbers (see M1, "Caveat for M5").
+- Warp has **no `ccd_iterations`/`ccd_tolerance` on its `opt`** at all, so the M1 setting of
+  50/1e-8 is CPU-only. In practice it does not seem to matter: Warp's penetration (-0.109 mm) is
+  *lower* than CPU's (-0.566 mm) on the same trajectory. Worth a second look on the H100.
+- Warp warns that `('CAPSULE','CYLINDER')` and `('CAPSULE','MESH')` pairs have no multicontact
+  support and get at most one contact point. Those are finger *links* against the cap and
+  hand self-collisions; the fingertip/cap pair (mesh/mesh) is unaffected. Re-check if the policy
+  starts using the middle phalanges to turn the cap.
+- Is 4*pi in 20 s the right success threshold? **The gap widened at M2.** The open-loop gait now
+  reaches 6.2 deg/s at the converged timestep against the 36 deg/s the criterion needs -- a
+  factor of 6, where before the timestep fix it looked like a factor of 4. The measured torque
+  ceiling (0.157 N*m vs 0.05 N*m of thread friction) still says a trained policy can get there,
+  but this should be checked against real policy numbers at M5 rather than assumed.
+- Is `sim_dt = 0.00125` affordable? It is 4x the PRD's substep count. Decide at M3 with GPU
+  throughput in hand; `sim_dt = 0.0025` is the fallback at a ~14% systematic error.

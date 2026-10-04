@@ -7,3 +7,4 @@ runs/
 wandb/
 *.npz
 *.mp4
+.DS_Store

@@ -39,10 +39,31 @@ def load(key: str = "pregrasp") -> tuple[mujoco.MjModel, mujoco.MjData]:
     return model, data
 
 
+def cap_dimensions(model: mujoco.MjModel) -> tuple[float, float]:
+    """The cap's outer radius and half-height.
+
+    `geom_size` is all zeros for a mesh geom, so read the mesh vertices when the cap is the
+    16-sided prism and `geom_size` when it is a primitive. Everything that reasons about the cap
+    wall goes through here, so the geometry can change without silently zeroing a radius.
+    """
+    cap = model.geom("cap").id
+    if model.geom_type[cap] != mujoco.mjtGeom.mjGEOM_MESH:
+        return float(model.geom_size[cap, 0]), float(model.geom_size[cap, 1])
+    mesh = model.geom_dataid[cap]
+    start = model.mesh_vertadr[mesh]
+    verts = np.array(model.mesh_vert[start:start + model.mesh_vertnum[mesh]], dtype=float)
+    # The compiler re-frames mesh vertices and puts the correction on the geom, so the raw
+    # vertices are not in the geom frame -- for this cap they come back with the prism axis
+    # along x. Rotate them back before measuring, or the "radius" reads 17.9 mm.
+    rot = np.zeros(9)
+    mujoco.mju_quat2Mat(rot, np.asarray(model.geom_quat[cap], dtype=float))
+    local = verts @ rot.reshape(3, 3).T + model.geom_pos[cap]
+    return float(np.linalg.norm(local[:, :2], axis=1).max()), float(np.abs(local[:, 2]).max())
+
+
 def cap_surface_distance(model: mujoco.MjModel, data: mujoco.MjData, site: str) -> float:
     """Distance from a site to the cap's lateral surface, in the cap frame."""
-    cap = model.geom("cap").id
-    radius, half_h = model.geom_size[cap, 0], model.geom_size[cap, 1]
+    radius, half_h = cap_dimensions(model)
     rel = data.site(site).xpos - data.site("cap_site").xpos
     cap_mat = data.site("cap_site").xmat.reshape(3, 3)
     local = cap_mat.T @ rel
@@ -63,7 +84,10 @@ def report(model: mujoco.MjModel, data: mujoco.MjData) -> None:
               f"ctrlrange=[{model.actuator_ctrlrange[a, 0]:+.4f}, {model.actuator_ctrlrange[a, 1]:+.4f}] "
               f"forcerange=[{model.actuator_forcerange[a, 0]:+.1f}, {model.actuator_forcerange[a, 1]:+.1f}]")
 
-    print("\nfingertips at the pregrasp pose:")
+    radius, half_h = cap_dimensions(model)
+    print(f"\ncap: {mujoco.mjtGeom(model.geom_type[model.geom('cap').id]).name} "
+          f"radius {radius*1e3:.1f} mm, half-height {half_h*1e3:.1f} mm")
+    print("fingertips at the pregrasp pose:")
     for tip in ALL_TIPS:
         mark = "*" if tip in GAIT_TIPS else " "
         print(f" {mark}{tip:10s} world={np.array2string(data.site(tip).xpos, precision=4)} "

@@ -31,9 +31,14 @@ import argparse
 import pathlib
 import re
 
+import sys
+
 import mujoco
 import numpy as np
 from scipy import optimize
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from view_scene import cap_dimensions  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCENE = ROOT / "assets" / "scene.xml"
@@ -44,6 +49,7 @@ GAIT_TIPS = ("rh_th_tip", "rh_ff_tip", "rh_mf_tip")
 IDLE_TIPS = ("rh_rf_tip", "rh_lf_tip")
 
 STANDOFF = 0.003  # fingertip pad to cap wall at the pregrasp pose [m]
+MIN_STANDOFF = 0.002  # ... and no gaiting tip may start closer than this [m]
 CLEARANCE = 0.002  # every geom pair must stay at least this far apart [m]
 BODY_CLEARANCE = 0.006  # ... and the hand must keep this far off the bottle itself [m]
 AXIAL_BAND = 0.004  # keep gaiting tips within this much of the cap mid-plane [m]
@@ -123,8 +129,7 @@ class PregraspFitter:
 
         self.forearm = m.body("rh_forearm").id
         self.cap_geom = m.geom("cap").id
-        self.cap_radius = float(m.geom_size[self.cap_geom, 0])
-        self.cap_half_h = float(m.geom_size[self.cap_geom, 1])
+        self.cap_radius, self.cap_half_h = cap_dimensions(m)
         self.cap_centre = np.array(m.body("cap").pos) + np.array(m.body("bottle").pos)
         self.cap_qadr = int(m.joint("cap_hinge").qposadr[0])
         self.bottle_geoms = {m.geom("bottle_body").id, m.geom("bottle_neck").id}
@@ -231,6 +236,10 @@ class PregraspFitter:
         tips = np.array([d.site(t).xpos for t in GAIT_TIPS]) - c
         radial = np.linalg.norm(tips[:, :2], axis=1)
         total += 1e6 * np.sum((radial - (R + STANDOFF)) ** 2)
+        # Asymmetric floor on top of the symmetric target. A tip that starts already loaded
+        # against the cap cannot squeeze -- a fit that left the thumb 0.7 mm off the wall scored
+        # well on every other term and then gaited at 5 deg where a clean pose gets 88.
+        total += 5e6 * np.sum(np.maximum(0.0, (R + MIN_STANDOFF) - radial) ** 2)
         total += 1e6 * np.sum(np.maximum(0.0, np.abs(tips[:, 2]) - AXIAL_BAND) ** 2)
 
         az = np.arctan2(tips[:, 1], tips[:, 0])
