@@ -3,9 +3,16 @@
 
   <!-- Deviates from the Leap MJX scene (Euler/pyramidal): an elliptic cone with impratio=10 is
        what Menagerie ships for this hand, and tangential/torsional friction fidelity is the whole
-       point of a twisting task. Warp-backend support is checked in scripts/check_parity.py. -->
+       point of a twisting task. Warp-backend support is checked in scripts/check_parity.py.
+
+       ccd_iterations/ccd_tolerance are raised well above the defaults (35 / 1e-6) because every
+       fingertip here is a *mesh* colliding with a *cylinder*, and convex-collision accuracy sets
+       how far the tips sink into the cap under grip load: at Playground's Leap setting of 10 the
+       worst case is 7.4 mm, at the default 35 it is 3.2 mm, and at 50 / 1e-8 it is 1.3 mm.
+       Measured in NOTES.md, M1. Re-check the throughput cost at M3. -->
   <option timestep="0.005" integrator="implicitfast" cone="elliptic" impratio="10"
-          solver="Newton" iterations="10" ls_iterations="20"/>
+          solver="Newton" iterations="10" ls_iterations="20"
+          ccd_iterations="50" ccd_tolerance="1e-8"/>
 
   <statistic center="0 0 0.2" extent="0.35" meansize="0.01"/>
 
@@ -40,9 +47,16 @@
          z=0.11, which lifts the cap from 8 mm to 24 mm above the 32 mm-radius shoulder. At the
          PRD values a fingertip on the cap wall sits 0.1 mm off the shoulder, leaving no room to
          gait; 500 ml PET bottles have a ~40 mm neck anyway. See NOTES.md. -->
+    <!-- The bottle and cap carry the same hardened contact parameters Menagerie gives the hand
+         geoms (solref 0.005 1, solimp 0.5 0.99 0.0001). This is NOT optional on the cap: with
+         priority=1 the cap's own solref/solimp govern every hand/cap contact, so leaving them at
+         MuJoCo's soft defaults quietly throws Menagerie's hardening away and the fingertips sink
+         millimetres into the cap under grip load. See NOTES.md, M1. -->
     <body name="bottle" pos="0 0 0.09">
-      <geom name="bottle_body" type="cylinder" size="0.032 0.09" material="bottle_mat"/>
-      <geom name="bottle_neck" type="cylinder" size="0.013 0.02" pos="0 0 0.11" material="bottle_mat"/>
+      <geom name="bottle_body" type="cylinder" size="0.032 0.09" material="bottle_mat"
+            solref="0.005 1" solimp="0.5 0.99 0.0001"/>
+      <geom name="bottle_neck" type="cylinder" size="0.013 0.02" pos="0 0 0.11" material="bottle_mat"
+            solref="0.005 1" solimp="0.5 0.99 0.0001"/>
       <body name="cap" pos="0 0 0.122">
         <!-- solreffriction/solimpfriction are not cosmetic. At MuJoCo's defaults the frictionloss
              constraint leaks: the cap creeps at ~5.9 deg/s under 0.01 N*m, a fifth of the thread
@@ -55,7 +69,8 @@
         <!-- priority=1 so the cap's friction and condim govern every hand/cap contact, which makes
              the DR friction knob actually bite (contact friction is otherwise an elementwise max). -->
         <geom name="cap" type="cylinder" size="0.016 0.008" mass="0.004"
-              condim="4" priority="1" friction="1.0 0.01 0.001" material="cap_mat"/>
+              condim="4" priority="1" friction="1.0 0.01 0.001" material="cap_mat"
+              solref="0.005 1" solimp="0.5 0.99 0.0001"/>
         <site name="cap_site" pos="0 0 0" size="0.002" group="4" rgba="0 1 0 1"/>
       </body>
     </body>

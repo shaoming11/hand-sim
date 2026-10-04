@@ -234,6 +234,111 @@ friction 1.0 have ample headroom. The binding constraint will be grasp geometry,
 
 ---
 
+## M1 — open-loop squeeze-and-twist
+
+`scripts/squeeze_twist.py`. **Result: the cap turns 89 deg in 9.6 s (9.3 deg/s) with thumb +
+first + middle, and 13.5 deg with the PRD's literal thumb-and-first pair.** The milestone's bar
+was "a few degrees", so this clears it by a wide margin. Rotation is monotonic -- the cap holds
+its angle through each release phase rather than springing back.
+
+### The hand has no forearm roll
+
+`rh_WRJ1`/`rh_WRJ2` flex and deviate; pronation/supination lives in the forearm, which is fixed.
+So the twist *must* come from the fingers. Tangential authority at the pregrasp pose, per rad of
+actuator: THJ4 72 mm, MFJ3 74 mm, THJ3 38 mm, FFJ4 29 mm. Plenty. The wrist is frozen by default
+in the gait script (`--use-wrist` to free it) so the result is a finger gait, not a wrist turn.
+
+### Separate where the fingers go from how hard they squeeze
+
+First attempt folded the squeeze into the IK target, aiming the tips at `cap_radius - press`.
+That gets worse as you press harder: at 20 mm the solver contorts the hand, the tips slide off
+the bottom of the cap onto the neck, and rotation *falls*. The working structure is
+
+* IK tracks targets **on the cap wall**, at the cap mid-plane -- well-conditioned postures;
+* grip is a separate actuator-space offset: a fraction of each flexion joint's remaining travel,
+  each joint moving whichever way its own fingertip Jacobian says is radially inward.
+
+Holding the tips at their pregrasp heights instead of the mid-plane lets the first fingertip
+drift to the cap's bottom edge and slide onto the neck (97 of 200 control steps in contact with
+the bottle; now 0).
+
+### Grip must come from flexion, never abduction
+
+A least-squares grip against a radial target put **-0.50 rad on MFJ4**, whose entire ctrlrange is
+0.70 rad. It slammed the middle finger's abduction joint into its stop, wedged the fingertip
+sideways into the cap, and blew the contact up to **268 N**. The abduction joints (`*J4`, `LFJ5`)
+are excluded from grip entirely; the thumb keeps all of its joints, since THJ5 is its strongest
+(±3 N·m) and opposition is what a thumb is for. Pinned by `test_grip_uses_flexion_not_abduction`.
+
+### `priority="1"` on the cap was silently discarding Menagerie's hardened contacts
+
+M0 gave the cap `priority="1"` so its friction and `condim` would govern hand/cap contacts. But
+priority governs `solref`/`solimp` too, so the cap's *soft defaults* (`0.02 1` / `0.9 0.95 0.001`)
+replaced the hand's deliberately hardened `0.005 1` / `0.5 0.99 0.0001`. Menagerie's README lists
+"Hardened the contacts on the hand geoms" as a deliberate step. The bottle and cap now carry those
+same hardened values explicitly. Penetration at a 12 mm squeeze went from -3.56 mm to -0.57 mm.
+
+Stiffer is not better beyond that. Direct-stiffness `solref` was tried and rejected:
+
+| cap/bottle solref | rotation | median pen. | p99 pen. | worst |
+|---|---|---|---|---|
+| **`0.005 1`** (chosen) | **93.7 deg** | **-0.101 mm** | **-2.079 mm** | **-3.190 mm** |
+| `-5000 -70` | 90.0 | -0.467 | -3.881 | -5.731 |
+| `-20000 -140` | 71.9 | -0.121 | -2.047 | -3.378 |
+| `-60000 -250` | 73.1 | -0.103 | -1.620 | -6.316 |
+
+### Convex-collision accuracy is what keeps the tips out of the cap
+
+Every fingertip is a *mesh* against a *cylinder*, so `ccd_iterations`/`ccd_tolerance` set how far
+the tips sink in under grip load:
+
+| `ccd_iterations` / `ccd_tolerance` | rotation | median pen. | p99 pen. | worst |
+|---|---|---|---|---|
+| 10 / 1e-6 — **Playground's Leap setting** | 92.0 deg | -0.462 mm | -4.084 mm | **-7.365 mm** |
+| 35 / 1e-6 — MuJoCo default | 93.7 | -0.101 | -2.079 | -3.190 |
+| **50 / 1e-8 — chosen** | 89.0 | **-0.090** | **-0.995** | **-1.334** |
+
+This is the one to watch when porting: `LeapHandEnv.__init__` sets `ccd_iterations = 10`, so
+inheriting from it unchanged would have given this scene up to 7.4 mm of fingertip penetration.
+Re-measure the throughput cost at M3.
+
+### Torque headroom — the number that matters for M5
+
+Grip force caps the achievable cap torque at `mu * r * sum(Fn)` = `1.0 * 0.016 * sum(Fn)`, so
+0.05 N·m of thread friction needs 3.13 N of total normal force. Ramping every flexion actuator
+from the pregrasp pose toward its limit:
+
+| extra flexion | sum(Fn) | torque ceiling | penetration |
+|---|---|---|---|
+| 10% | 1.92 N | 0.031 N·m | -0.07 mm |
+| 20% | 6.85 N | 0.110 N·m | -0.67 mm |
+| **35%** | **9.79 N** | **0.157 N·m** | **-0.09 mm** |
+| 50% | 5.30 N | 0.085 N·m | -0.09 mm |
+| 100% | 0.83 N | 0.013 N·m | -0.51 mm |
+
+**The ceiling is ~3x the thread friction**, so the scene is not marginal. (The fall-off past 35%
+is the fingers curling past the cap and losing it, not a force limit.) Before the flexion-grip
+fix the gait only reached 0.038-0.063 N·m of cap torque -- right at the 0.05 threshold, which is
+why ~97% of each commanded sweep was being lost to slip.
+
+**Caveat for M5.** The crude gait reaches 9.3 deg/s. The PRD's success criterion is 4*pi within a
+400-step/20 s episode, i.e. **36 deg/s** -- about 4x faster. The torque headroom says a trained
+policy can get there, but it is not free, and gait *speed* alone does not do it: cycle periods
+from 0.4 s to 2.0 s all land within 0.8-1.1 deg/s at a fixed grip. Grip strength is the lever.
+Worth re-checking the success threshold against measured policy performance at M5 rather than
+assuming 4*pi is comfortably reachable.
+
+### Other measurements
+
+- Two fingers are not enough to be interesting: thumb+first tops out near 13.5 deg where
+  thumb+first+middle reaches 89 deg. All five fingers reach 135.6 deg but start catching the
+  bottle. Three is the right default.
+- `artifacts/squeeze_twist.npz` holds the ctrl sequence (192 x 20 at 20 Hz), the cap-angle trace
+  and the gait parameters. `check_parity.py` replays it at M2. It is gitignored -- regenerate
+  with `python3 scripts/squeeze_twist.py`.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
@@ -243,3 +348,8 @@ friction 1.0 have ample headroom. The binding constraint will be grasp geometry,
 - Fixed-tendon actuators (`rh_A_*J0`) under Warp.
 - The hand keeps Menagerie's default self-collision. 66 geoms total. Prune only if M3 shows
   throughput is poor (PRD).
+- Does Warp honour `ccd_iterations`/`ccd_tolerance`, and what do they cost in throughput? M1
+  needs 50/1e-8 on CPU to keep fingertips out of the cap; if Warp caps or ignores them, expect
+  deeper penetration on the GPU than on the Mac, and `check_parity.py` should catch it.
+- Is 4*pi in 20 s the right success threshold? The open-loop gait reaches a quarter of that
+  speed. Revisit at M5 with measured policy numbers (see M1, "Caveat for M5").
