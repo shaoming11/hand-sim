@@ -4,9 +4,9 @@ Shadow Hand unscrewing a bottle cap by finger gaiting. Built from [`PRD.md`](PRD
 milestone at a time; deviations, measured numbers and open questions live in
 [`NOTES.md`](NOTES.md).
 
-Status: **M0** (scene), **M1** (open-loop feasibility) and **M2** (MJX parity) done.
-**M3** (benchmark) is written and validated but unmeasured -- it needs the H100, so `num_envs`
-is not yet chosen. See the runbook in [`NOTES.md`](NOTES.md).
+Status: **M0** (scene), **M1** (open-loop feasibility), **M2** (MJX parity) and **M3**
+(benchmark) done, all measured on an H100. **`num_envs = 8192`**, `sim_dt = 0.00125` --
+1.26M sim-steps/s, 1,572x realtime, 8% of an 80 GB GPU. M4 (the env) is next.
 
 ## Setup (Mac, CPU)
 
@@ -53,17 +53,18 @@ backend. `impl='jax'` cannot run this scene (no cylinder/mesh collisions).
 
 ```bash
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export MUJOCO_GL=egl
+unset MUJOCO_GL          # EGL is broken on the Daytona image and breaks `import mujoco`
 python3 -c "import jax; print(jax.default_backend())"   # must print: gpu
 
-python3 scripts/squeeze_twist.py                        # regenerate the trajectory
-python3 scripts/check_parity.py                         # confirm M2 holds on CUDA
-python3 scripts/benchmark.py --out artifacts/bench.json # M3: steps/s vs num_envs
-python3 scripts/benchmark.py --sim-dt 0.005,0.0025,0.00125 --num-envs 8192
+python3 scripts/squeeze_twist.py     # regenerate the trajectory at the current timestep
+python3 scripts/check_parity.py      # M2 on CUDA
+python3 scripts/benchmark.py --num-envs 8192 --out artifacts/bench.json
 ```
 
-The last call settles the open question from M2: whether `sim_dt=0.00125` is affordable, or
-whether to fall back to `0.0025` at a ~14% systematic overestimate of cap rotation.
+**Run one `num_envs` per process.** With `XLA_PYTHON_CLIENT_PREALLOCATE=false` JAX grows its
+pool and never releases it, so sweeping several env counts in one process starves Warp and the
+largest one fails to allocate. There is no `git` on the box -- sync with
+`tar czf - . | ssh HOST 'tar xzf - -C ~/hand-sim'`.
 
 ## Changing the scene
 

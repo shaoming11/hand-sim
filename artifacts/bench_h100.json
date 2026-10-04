@@ -1,0 +1,115 @@
+{
+  "machine": "Daytona 1x NVIDIA H100 80GB HBM3, driver 595.91.07, 52 vCPU, 442 GiB RAM",
+  "software": {
+    "jax": "0.11.2 (cuda12)",
+    "mujoco": "3.14.0",
+    "mujoco-mjx": "3.14.0",
+    "warp-lang": "1.17.0",
+    "playground": "0.2.0"
+  },
+  "method": "scripts/benchmark.py, M1 gait replayed, 50 timed control steps after 5 warmup, compilation excluded, naconmax=44*num_envs, njmax=150",
+  "throughput_vs_num_envs": [
+    {
+      "num_envs": 1024,
+      "sim_dt": 0.00125,
+      "ms_per_control_step": 76.6,
+      "control_steps_per_s": 13366,
+      "sim_steps_per_s": 534623,
+      "realtime": 668
+    },
+    {
+      "num_envs": 2048,
+      "sim_dt": 0.00125,
+      "ms_per_control_step": 96.8,
+      "control_steps_per_s": 21152,
+      "sim_steps_per_s": 846069,
+      "realtime": 1058
+    },
+    {
+      "num_envs": 4096,
+      "sim_dt": 0.00125,
+      "ms_per_control_step": 144.5,
+      "control_steps_per_s": 28352,
+      "sim_steps_per_s": 1134071,
+      "realtime": 1418
+    },
+    {
+      "num_envs": 8192,
+      "sim_dt": 0.00125,
+      "ms_per_control_step": 260.5,
+      "control_steps_per_s": 31449,
+      "sim_steps_per_s": 1257946,
+      "realtime": 1572
+    },
+    {
+      "num_envs": 16384,
+      "sim_dt": 0.00125,
+      "error": "warp failed to allocate multiccd_polygon buffer"
+    }
+  ],
+  "sim_dt_cost_at_8192": [
+    {
+      "sim_dt": 0.005,
+      "n_substeps": 10,
+      "control_steps_per_s": 72698,
+      "sim_steps_per_s": 726983
+    },
+    {
+      "sim_dt": 0.0025,
+      "n_substeps": 20,
+      "control_steps_per_s": 53394,
+      "sim_steps_per_s": 1067880
+    },
+    {
+      "sim_dt": 0.00125,
+      "n_substeps": 40,
+      "control_steps_per_s": 31478,
+      "sim_steps_per_s": 1259124
+    }
+  ],
+  "solver_iterations_at_8192": [
+    {
+      "iterations": 10,
+      "ls_iterations": 20,
+      "control_steps_per_s": 29435,
+      "overflow": [
+        "ITERATIONS",
+        "LS_ITERATIONS"
+      ]
+    },
+    {
+      "iterations": 20,
+      "ls_iterations": 30,
+      "control_steps_per_s": 31337,
+      "overflow": []
+    },
+    {
+      "iterations": 30,
+      "ls_iterations": 50,
+      "control_steps_per_s": 31318,
+      "overflow": []
+    },
+    {
+      "iterations": 50,
+      "ls_iterations": 80,
+      "control_steps_per_s": 31316,
+      "overflow": []
+    }
+  ],
+  "gpu_memory_at_8192_MiB": 6553,
+  "gpu_memory_total_MiB": 81559,
+  "chosen": {
+    "num_envs": 8192,
+    "sim_dt": 0.00125,
+    "iterations": 30,
+    "ls_iterations": 50
+  },
+  "m2_parity_on_cuda": {
+    "cpu_deg": 59.43,
+    "warp_deg": 60.95,
+    "relative": 0.026,
+    "overflow_flags": [],
+    "solver_niter_max": 9,
+    "verdict": "PASS"
+  }
+}

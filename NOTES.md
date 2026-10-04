@@ -488,75 +488,96 @@ trusting the new pose.
 
 ## M3 — benchmark
 
-**Status: the script is written and validated; the numbers are NOT measured.** `benchmark.py`
-needs a GPU and this machine has none, so `num_envs` is not yet chosen and M3 is not done. What
-follows is the harness, the runbook, and the decision rule to apply to the output.
+Measured on the Daytona box: **1x NVIDIA H100 80GB HBM3**, driver 595.91.07, 52 vCPU, 442 GiB
+RAM, CUDA JAX 0.11.2. Raw data in `artifacts/bench_h100.json`. Method: `scripts/benchmark.py`
+replaying the M1 gait, 50 timed control steps after 5 warmup, compilation excluded,
+`naconmax = 44 * num_envs`, `njmax = 150`.
 
-### Runbook for the H100
+### Throughput vs `num_envs` (at the chosen `sim_dt = 0.00125`, 40 substeps)
 
-```bash
-export XLA_PYTHON_CLIENT_PREALLOCATE=false   # else JAX takes the VRAM Warp needs
-export MUJOCO_GL=egl
-python3 -c "import jax; print(jax.default_backend())"   # must print: gpu
+| num_envs | ms / control step | control steps/s | sim steps/s | x realtime | gain on doubling |
+|---|---|---|---|---|---|
+| 1024 | 76.6 | 13,366 | 534,623 | 668x | — |
+| 2048 | 96.8 | 21,152 | 846,069 | 1,058x | 1.58x |
+| 4096 | 144.5 | 28,352 | 1,134,071 | 1,418x | 1.34x |
+| **8192** | **260.5** | **31,449** | **1,257,946** | **1,572x** | **1.11x** |
+| 16384 | — | — | — | — | warp failed to allocate its `multiccd_polygon` buffer |
 
-python3 scripts/squeeze_twist.py                       # regenerate the trajectory
-python3 scripts/check_parity.py                        # confirm M2 holds on real Warp/CUDA
-python3 scripts/benchmark.py --out artifacts/bench.json
-python3 scripts/benchmark.py --sim-dt 0.005,0.0025,0.00125 --num-envs 8192
-```
+Two independent runs at 8192 gave 31,449 and 31,478 control steps/s — 0.1% apart, so these are
+repeatable to well within the precision quoted.
 
-The second benchmark call is the one that settles the open M2 question: whether
-`sim_dt = 0.00125` is affordable, or whether to fall back to `0.0025` at a ~14% systematic
-overestimate of cap rotation.
+### `num_envs = 8192`
 
-### What the harness does that a plain timing loop would not
+The knee is really at 4096: doubling to 8192 buys only 11% more throughput, against the ~15%
+rule written down before the numbers existed. 8192 wins anyway, for reasons the rule does not
+capture:
 
-* **Scales `naconmax` by `num_envs`.** It is a total across worlds (M2), so the benchmark uses
-  `44 * num_envs` and `njmax = 150`. Getting this wrong does not crash: it silently overflows
-  the broadphase and still reports a throughput.
-* **Checks for overflow in every configuration** and marks the row `INVALID` if a *buffer*
-  overflowed, so an impossible number cannot be mistaken for a fast one. Solver and linesearch
-  limits are reported but do not invalidate: they cost accuracy, not correctness.
-* **Excludes compilation.** The first call compiles Warp kernels and traces XLA; that time is
-  reported in its own column and never counted as throughput.
-* **Replays the M1 gait by default** rather than random actions, so the contact load is
-  representative. `--actions random` is there for comparison.
+* It is still the **highest measured throughput**, and the 11% is free — memory is a non-issue
+  at **6.5 GiB of 81.6 GiB (8%)**, leaving the whole GPU for the learner.
+* It matches Playground's tuned `LeapCubeRotateZAxis` config exactly, so `unroll_length=40`,
+  `batch_size=256`, `num_minibatches=32` and `num_updates_per_batch=4` transfer unchanged.
+  Choosing 4096 halves the transitions per PPO iteration (327,680 -> 163,840) and the whole
+  config would have to be re-derived rather than inherited.
+* Simulation is nowhere near the bottleneck: 100M env-steps is **53 minutes** of pure
+  simulation at this rate, so PPO's own compute will dominate wall-clock. Spending throughput
+  on a larger, more diverse batch is the better trade.
 
-### Local smoke numbers — NOT throughput data
+### `sim_dt = 0.00125` is affordable — the M2 question, settled
 
-warp-cpu on the M1, 4 envs, 6 timed control steps. Useful only as evidence the harness runs and
-that the columns are self-consistent:
+At `num_envs = 8192`:
 
-| sim_dt | substeps | ctrl steps/s | vs 0.005 |
-|---|---|---|---|
-| 0.005 | 10 | 24 | 1.00x |
-| 0.0025 | 20 | 14 | 1.65x |
-| 0.00125 | 40 | 8 | **2.86x** |
+| sim_dt | substeps | control steps/s | slowdown | 100M env-steps |
+|---|---|---|---|---|
+| 0.005 (PRD, **not converged**) | 10 | 72,698 | 1.00x | 23 min |
+| 0.0025 (~14% systematic error) | 20 | 53,394 | 1.36x | 31 min |
+| **0.00125 (chosen, converged)** | **40** | **31,478** | **2.31x** | **53 min** |
 
-Note the cost of M2's timestep fix comes out at **2.9x**, not the 4x the substep count implies,
-because per-step overhead dominates at 4 envs. On a GPU at 8192 envs the fixed overhead is
-amortised and the ratio should move toward 4x. **Do not quote 2.9x as the answer** -- it is a
-CPU artefact at a batch size nobody trains at.
+4x the substeps costs **2.31x**, not 4x, because the fixed per-control-step overhead amortises.
+In wall-clock the correctness fix is about **30 extra minutes of simulation per 100M env-steps**
+— cheap enough that the fallback to `sim_dt = 0.0025` is not worth its 14% error. **The M2
+timestep decision stands and the open question is closed.**
 
-### How to choose `num_envs` from the output
+### Raising the solver iteration cap is free — and the cap that overflows is *slower*
 
-The PRD asks for 1024 / 4096 / 8192. Pick by this order:
+The worry at M2 was that a SIMD batch pays for its worst world, so allowing 30 iterations might
+cost throughput. It does not. At `num_envs = 8192`:
 
-1. **Discard any row marked `INVALID`.** A buffer overflow makes the physics wrong, not just
-   slow.
-2. **Take the largest `num_envs` that still scales.** Throughput should grow close to linearly
-   with `num_envs` while the GPU is underfilled and then flatten. The right choice is at the
-   knee: the largest count before `sim steps/s` stops improving materially (say <15% gain from
-   doubling). Past the knee, more envs cost memory and wall-clock per PPO iteration without
-   buying throughput.
-3. **Sanity-check it against the PPO config.** Playground's `LeapCubeRotateZAxis` uses
-   `num_envs=8192`, `unroll_length=40`, `batch_size=256`, `num_minibatches=32`. A batch is
-   `num_envs * unroll_length` transitions, so changing `num_envs` changes the effective batch and
-   the PPO config should be revisited rather than inherited blindly.
-4. **Then re-decide `sim_dt`** with the second benchmark call, now that the cost is a measured
-   number rather than an estimate.
+| iterations / ls_iterations | control steps/s | overflow |
+|---|---|---|
+| 10 / 20 (PRD) | 29,435 | **ITERATIONS, LS_ITERATIONS** |
+| 20 / 30 | 31,337 | none |
+| **30 / 50 (chosen)** | **31,318** | none |
+| 50 / 80 | 31,316 | none |
 
-Record the resulting table here and state the chosen `num_envs` with the reason.
+Anything from 20 upwards is identical to within 0.07%, because the solver exits on convergence
+and the cap never binds. The non-converging 10/20 setting is **6% slower** than the converged
+ones — it costs throughput *and* accuracy. Converging is not a tradeoff here.
+
+### M2 re-confirmed on real CUDA
+
+`check_parity.py` on the H100, same trajectory: CPU +59.43 deg vs MJX-Warp **+60.95 deg
+(2.6%)**, `nacon` 11, `ncollision` 22, `nefc` 71, **no overflow flags of any kind**, solver
+using 9 of 30 iterations, deepest penetration -0.104 mm against CPU's -0.566 mm. All three M2
+criteria PASS on the GPU, and the full suite including the opt-in Warp rollouts (32 tests)
+passes there. The buffer sizing measured on warp-cpu transfers exactly — `ncollision` is 22 on
+both, so `naconmax = 44 * num_envs` and `njmax = 150` hold.
+
+`artifacts/gpu_parity_h100.log` is an earlier parity run on the same box (1.7%), kept as a
+second independent data point.
+
+### Operational notes for the GPU box
+
+* **`MUJOCO_GL=egl` breaks imports here.** EGL is not functional on this image and setting the
+  variable makes `import mujoco` fail in `egl_ext.py`. Nothing on the box renders, so leave
+  `MUJOCO_GL` unset; render on the Mac instead.
+* **Run one `num_envs` per process.** With `XLA_PYTHON_CLIENT_PREALLOCATE=false` JAX grows its
+  pool on demand and never releases it, so sweeping 1024 -> 4096 -> 8192 in a single process
+  leaves Warp unable to allocate and 8192 fails. In a fresh process 8192 is fine and uses 8% of
+  the GPU. This is the PRD's warning ("JAX otherwise grabs most of the VRAM before Warp gets
+  any") showing up as a mid-sweep failure rather than at startup.
+* **No `git` and no `time` on the image.** Sync with `tar | ssh`, and note `scp` to `~/path`
+  fails — use an absolute `/root/...` destination or pipe through `cat`.
+
 
 ---
 
@@ -581,10 +602,11 @@ Record the resulting table here and state the chosen `num_envs` with the reason.
   factor of 6, where before the timestep fix it looked like a factor of 4. The measured torque
   ceiling (0.157 N*m vs 0.05 N*m of thread friction) still says a trained policy can get there,
   but this should be checked against real policy numbers at M5 rather than assumed.
-- Is `sim_dt = 0.00125` affordable? It is 4x the PRD's substep count. **Still open** -- M3's
-  harness is ready but needs the H100. `sim_dt = 0.0025` is the fallback at a ~14% systematic
-  error. Run `benchmark.py --sim-dt 0.005,0.0025,0.00125 --num-envs 8192` to settle it.
-- What is `num_envs`? **Still open**, for the same reason. Decision rule is in the M3 section.
-- Does raising `iterations` to 30 cost anything on a GPU? On warp-cpu it does not, because the
-  solver exits early, but a SIMD batch pays for its worst world rather than its average one.
-  Compare `benchmark.py` with `iterations` at 30 and at 20 once the box is up.
+- ~~Is `sim_dt = 0.00125` affordable?~~ **Closed at M3**: 2.31x, about 30 extra minutes of
+  simulation per 100M env-steps. It stands.
+- ~~What is `num_envs`?~~ **Closed at M3**: 8192.
+- ~~Does raising `iterations` to 30 cost anything on a GPU?~~ **Closed at M3**: no — and the
+  non-converging 10/20 setting is 6% *slower*.
+- Why does `num_envs = 16384` fail to allocate when 8192 uses only 8% of the GPU? Not needed
+  (8192 is already past the throughput knee) but it suggests a warp buffer sized by something
+  other than free memory. Revisit only if a larger batch ever looks worthwhile.

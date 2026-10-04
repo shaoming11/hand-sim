@@ -138,6 +138,9 @@ def main() -> None:
     ap.add_argument("--actions", default="gait", choices=["gait", "random"])
     ap.add_argument("--naconmax-per-world", type=int, default=NACONMAX_PER_WORLD)
     ap.add_argument("--njmax", type=int, default=NJMAX)
+    ap.add_argument("--solver-iterations", type=int, default=None,
+                    help="override; a SIMD batch pays for its worst world, so this can cost")
+    ap.add_argument("--ls-iterations", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="write the results as JSON")
     args = ap.parse_args()
@@ -159,9 +162,14 @@ def main() -> None:
     for sim_dt in sim_dts:
         model = mujoco.MjModel.from_xml_path(SCENE.as_posix())
         model.opt.timestep = sim_dt
+        if args.solver_iterations is not None:
+            model.opt.iterations = args.solver_iterations
+        if args.ls_iterations is not None:
+            model.opt.ls_iterations = args.ls_iterations
         n_substeps = int(round(CTRL_DT / sim_dt))
         actions = load_actions(args.actions, model, args.steps, args.seed)
         print(f"sim_dt={sim_dt:g} ({n_substeps} substeps per {CTRL_DT:g} s control step), "
+              f"iterations={model.opt.iterations}/{model.opt.ls_iterations}, "
               f"actions={args.actions}, {args.steps} timed steps")
         print(f"  {'num_envs':>9}{'ms/step':>10}{'ctrl steps/s':>14}{'sim steps/s':>14}"
               f"{'x realtime':>12}{'compile s':>11}  status")
