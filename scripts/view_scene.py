@@ -1,12 +1,18 @@
-"""Open the CPU MuJoCo viewer on `assets/scene.xml` at the `pregrasp` keyframe.
+"""Open the CPU MuJoCo viewer on `assets/scene.xml`.
 
-    python3 scripts/view_scene.py                 # interactive viewer
-    python3 scripts/view_scene.py --key pregrasp  # pick a keyframe by name
-    python3 scripts/view_scene.py --report        # headless: print the scene summary and exit
+    python3 scripts/view_scene.py             # static, at the pregrasp keyframe
+    python3 scripts/view_scene.py --play      # replay the open-loop gait, looping
+    python3 scripts/view_scene.py --report    # headless: print the scene summary and exit
 
-In the viewer, ctrl+drag the cap to check that the hinge turns and that the hand is not
-penetrating the bottle. Fingertip sites and the cap site are in visualisation group 4; press
-`s` (or use the Rendering panel) to toggle site display.
+Static mode starts at the `pregrasp` keyframe and holds it. Ctrl+drag the cap to check that the
+hinge turns and that the hand is not penetrating the bottle.
+
+`--play` re-simulates `artifacts/squeeze_twist.npz` in real time and loops it, so the gait is
+driven by physics rather than scrubbed from recorded positions. Generate that file first with
+`python3 scripts/squeeze_twist.py`; `--play PATH` takes any other ctrl trajectory.
+
+Fingertip sites and the cap site are in visualisation group 4 -- turn on "site" under the
+Rendering panel to see them. The cameras are `front`, `cap` and `back`; cycle with `[` and `]`.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCENE = ROOT / "assets" / "scene.xml"
+DEFAULT_TRAJECTORY = ROOT / "artifacts" / "squeeze_twist.npz"
 
 GAIT_TIPS = ("rh_th_tip", "rh_ff_tip", "rh_mf_tip")
 ALL_TIPS = GAIT_TIPS + ("rh_rf_tip", "rh_lf_tip")
@@ -72,10 +79,41 @@ def report(model: mujoco.MjModel, data: mujoco.MjData) -> None:
         print(f"  dist={con.dist*1e3:+7.3f} mm  {names[0]} / {names[1]}")
 
 
+def play(model: mujoco.MjModel, data: mujoco.MjData, ctrl: np.ndarray, n_substeps: int,
+         realtime: float) -> None:
+    """Re-simulate a ctrl trajectory in the passive viewer, looping."""
+    import time
+
+    import mujoco.viewer
+
+    cap_adr = int(model.joint("cap_hinge").qposadr[0])
+    step_wall = model.opt.timestep * n_substeps / max(realtime, 1e-6)
+    print(f"\nreplaying {len(ctrl)} control steps "
+          f"({len(ctrl) * model.opt.timestep * n_substeps:.1f} s) at {realtime:g}x, looping. "
+          f"Close the window to stop.")
+    with mujoco.viewer.launch_passive(model, data) as viewer:
+        while viewer.is_running():
+            mujoco.mj_resetDataKeyframe(model, data, model.keyframe("pregrasp").id)
+            for u in ctrl:
+                if not viewer.is_running():
+                    break
+                start = time.time()
+                for _ in range(n_substeps):
+                    data.ctrl[:] = u
+                    mujoco.mj_step(model, data)
+                viewer.sync()
+                time.sleep(max(0.0, step_wall - (time.time() - start)))
+            print(f"  loop finished: cap at {np.degrees(data.qpos[cap_adr]):+.1f} deg")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--key", default="pregrasp")
-    ap.add_argument("--report", action="store_true", help="print a summary instead of opening a window")
+    ap.add_argument("--report", action="store_true",
+                    help="print a summary instead of opening a window")
+    ap.add_argument("--play", nargs="?", const=str(DEFAULT_TRAJECTORY), default=None,
+                    metavar="NPZ", help="replay a ctrl trajectory instead of holding the keyframe")
+    ap.add_argument("--speed", type=float, default=1.0, help="playback rate, 1.0 = real time")
     args = ap.parse_args()
 
     model, data = load(args.key)
@@ -84,6 +122,16 @@ def main() -> None:
         return
 
     report(model, data)
+    if args.play:
+        path = pathlib.Path(args.play)
+        if not path.exists():
+            raise SystemExit(
+                f"{path} not found -- generate it with: python3 scripts/squeeze_twist.py"
+            )
+        npz = np.load(path)
+        play(model, data, npz["ctrl"], int(npz["n_substeps"]), args.speed)
+        return
+
     import mujoco.viewer
 
     print("\nopening viewer; ctrl+drag the cap to check the hinge turns")

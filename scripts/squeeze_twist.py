@@ -254,12 +254,14 @@ class OpenLoopGait:
         d = mujoco.MjData(m)
         mujoco.mj_resetDataKeyframe(m, d, m.keyframe("pregrasp").id)
         angle = np.zeros(len(ctrl))
+        qpos = np.zeros((len(ctrl), m.nq))
         worst_pen, bottle_hits, cap_contacts = 0.0, 0, []
         for t, u in enumerate(ctrl):
             for _ in range(n_substeps):
                 d.ctrl[:] = u
                 mujoco.mj_step(m, d)
             angle[t] = d.qpos[self.cap_qadr]
+            qpos[t] = d.qpos
             n_cap = 0
             for i in range(d.ncon):
                 con = d.contact[i]
@@ -271,6 +273,7 @@ class OpenLoopGait:
             cap_contacts.append(n_cap)
         return {
             "angle": angle,
+            "qpos": qpos,
             "total_deg": float(np.degrees(angle[-1])),
             "worst_penetration_mm": worst_pen * 1e3,
             "bottle_contact_steps": bottle_hits,
@@ -345,7 +348,7 @@ def main() -> None:
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
-        out, ctrl=ctrl, cap_angle=res["angle"], fingers=np.array(fingers),
+        out, ctrl=ctrl, qpos=res["qpos"], cap_angle=res["angle"], fingers=np.array(fingers),
         ctrl_dt=0.05, sim_dt=gait.model.opt.timestep, n_substeps=10, keyframe="pregrasp",
         grip=args.grip, twist=args.twist, release=args.release, cycles=args.cycles,
         phase_steps=np.array(phase_steps), grip_z=args.grip_z,
