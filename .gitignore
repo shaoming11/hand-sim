@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 # training artefacts
 checkpoints/
+logs/
 runs/
 wandb/
 *.npz

@@ -28,6 +28,23 @@ One actor frame is 70 numbers, and `state` is the last `history_len` (3) of them
 The actor deliberately cannot see the cap angle. The cap is rotationally symmetric, so the
 policy does not need it and could not measure it on hardware.
 
+Metrics, and why they are rates rather than levels
+--------------------------------------------------
+Brax reads `state.metrics` through `EvalWrapper`, which **sums** each one over the episode's
+active steps and only divides by the episode length for names ending in `_per_step`. A metric
+defined as a level therefore logs as nonsense: a per-step "cumulative rotation so far" sums to
+the area under the rotation curve, and a per-step "is past 4*pi" sums to a step count. So every
+metric here is defined so that its episode sum is the quantity worth reading:
+
+    cap_rotation          d_theta        -> net radians turned in the episode
+    cap_rotation_abs      |d_theta|      -> gross radians turned
+    cap_angvel_per_step   angular vel.   -> mean angular velocity (Brax divides)
+    success               4*pi crossing  -> 1 for a successful episode
+    reward/<term>         the term       -> that term's contribution to the return
+
+`cap_rotation / cap_rotation_abs` is then a free exploit detector: a policy that turns the cap
+by shaking it back and forth scores near zero on the ratio while a real gait scores near one.
+
 Auto-reset and what may live in `info`
 --------------------------------------
 Playground's `BraxAutoResetWrapper` with `full_reset=False` restores `data` and `obs` at an
@@ -185,10 +202,14 @@ class CapTurn(mjx_env.MjxEnv):
             "last_cap_angle": cap_angle,
         }
 
+        # Every metric here is defined so that *summing it over an episode* is the
+        # quantity worth reading -- see the module docstring. `_per_step` is Brax's own
+        # suffix for "divide by the episode length", which turns a sum into a mean.
         metrics = {f"reward/{k}": jp.zeros(()) for k in self._config.reward_config.scales}
-        metrics["cap_rotation"] = jp.zeros(())
-        metrics["cap_angvel"] = jp.zeros(())
-        metrics["success"] = jp.zeros(())
+        metrics["cap_rotation"] = jp.zeros(())  # d_theta -> net radians turned
+        metrics["cap_rotation_abs"] = jp.zeros(())  # |d_theta| -> gross radians turned
+        metrics["cap_angvel_per_step"] = jp.zeros(())  # -> mean angular velocity
+        metrics["success"] = jp.zeros(())  # the 4*pi crossing -> the success flag
 
         obs = self._get_obs(data, info, jp.zeros(self._config.history_len * FRAME_SIZE))
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
@@ -213,8 +234,8 @@ class CapTurn(mjx_env.MjxEnv):
         rotation = cap_angle - info["cap_angle_init"]
 
         done = self._get_termination(data)
-        rewards = self._get_reward(data, action, info, d_theta, rotation)
-        rewards = {k: v * self._config.reward_config.scales[k] for k, v in rewards.items()}
+        terms = self._get_reward(data, action, info, d_theta, rotation)
+        rewards = {k: v * self._config.reward_config.scales[k] for k, v in terms.items()}
         # Playground's convention: the terms are rates and the sum is integrated over the
         # control period. The rotate term is then literally radians turned this step.
         reward = sum(rewards.values()) * self.dt
@@ -230,9 +251,10 @@ class CapTurn(mjx_env.MjxEnv):
 
         for k, v in rewards.items():
             state.metrics[f"reward/{k}"] = v
-        state.metrics["cap_rotation"] = rotation
-        state.metrics["cap_angvel"] = self._cap_angvel(data)
-        state.metrics["success"] = (rotation >= self._config.success_rotation).astype(float)
+        state.metrics["cap_rotation"] = d_theta
+        state.metrics["cap_rotation_abs"] = jp.abs(d_theta)
+        state.metrics["cap_angvel_per_step"] = self._cap_angvel(data)
+        state.metrics["success"] = terms["success"]
 
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
 
@@ -279,7 +301,7 @@ class CapTurn(mjx_env.MjxEnv):
         d_theta: jax.Array,
         rotation: jax.Array,
     ) -> Dict[str, jax.Array]:
-        gaps = self._tip_gaps(data)
+        gaps = self.tip_gaps(data)
         threshold = self._config.success_rotation
         # Fires on the control step that crosses the threshold going forward. A latch in `info`
         # would be exactly one-time, but it evolves during the episode and so would go stale
@@ -299,7 +321,7 @@ class CapTurn(mjx_env.MjxEnv):
         nan = ~jp.isfinite(data.qpos).all() | ~jp.isfinite(data.qvel).all()
         if not self._config.early_termination:
             return nan
-        dropped = (self._tip_gaps(data) > self._config.drop_distance).all()
+        dropped = (self.tip_gaps(data) > self._config.drop_distance).all()
         return nan | dropped
 
     # ---------------------------------------------------------------------------------
@@ -319,8 +341,11 @@ class CapTurn(mjx_env.MjxEnv):
         """Fingertip positions in the cap frame, (len(sensors), 3)."""
         return jp.stack([self._sensor(data, s) for s in sensors])
 
-    def _tip_gaps(self, data: mjx.Data) -> jax.Array:
-        """Gap from each gaiting fingertip to the cap surface, (3,)."""
+    def tip_gaps(self, data: mjx.Data) -> jax.Array:
+        """Gap from each gaiting fingertip to the cap surface, (3,).
+
+        Public because `scripts/eval.py` reads it to tell gaiting from a static grip.
+        """
         return scene.surface_distance(
             self._tip_positions(data, scene.GAIT_TIP_SENSORS),
             self._cap_radius,

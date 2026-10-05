@@ -90,10 +90,19 @@ def test_privileged_state_contains_the_actor_history_verbatim(env):
 
 
 def test_metrics_cover_every_reward_term_and_the_task_measures(env):
+    """The PRD's metric list -- cumulative rotation, mean angular velocity, success flag, each
+    reward term -- as names that mean the right thing after Brax's eval aggregation sums them
+    over the episode. M5 found that a metric defined as a *level* logs as the area under its
+    own curve; see NOTES.md, M5."""
     state = jax.eval_shape(env.reset, jax.random.PRNGKey(0))
     scales = env._config.reward_config.scales
     assert {f"reward/{k}" for k in scales} <= set(state.metrics)
-    assert {"cap_rotation", "cap_angvel", "success"} <= set(state.metrics)
+    assert {
+        "cap_rotation",  # d_theta -> sums to the episode's net rotation
+        "cap_rotation_abs",  # |d_theta| -> sums to the gross rotation
+        "cap_angvel_per_step",  # Brax divides `_per_step` names by the episode length
+        "success",  # the 4*pi crossing -> sums to the success flag
+    } <= set(state.metrics)
     assert set(scales) == {
         "rotate", "reach", "action_rate", "torques", "joint_vel", "success"
     }, "the PRD's six reward terms"

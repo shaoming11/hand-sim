@@ -731,6 +731,251 @@ directly rather than threading parameters through `info`. And Playground's envs 
 `default_config()` as a *default argument*, so `config_overrides` mutates a dict shared by every
 later instance; `CapTurn` defaults to `None` and builds a fresh config.
 
+---
+
+## M5 — nominal training
+
+`scripts/train.py` (Brax PPO through Playground's wrapper), `scripts/eval.py` (success rate and
+the exploit checks), `capturn/compat.py` (two dependency shims, below) and
+`tests/test_train.py` (27 checks in the default suite, 1 behind `HAND_SIM_SLOW=1`).
+
+**The milestone criteria are not met yet, and cannot be from here.** "Success rate above 80%
+over 1000 eval episodes" needs the 150M-step run on the H100; what is built and verified is the
+pipeline that produces that number, end to end on warp-cpu: train -> checkpoint -> load the
+checkpoint back -> roll out 1024 episodes -> write `.npz` -> render on the Mac. The
+`HAND_SIM_SLOW` test does exactly that round trip (4 min on the Mac at `--smoke` sizes) and is
+what every finding below came out of.
+
+### The Brax/JAX pair does not work out of the box, in two places
+
+Neither is reachable by importing anything. The first fires several minutes into a run, after
+the env is built and the Warp kernels are compiled; the second only when a checkpoint is read
+back. Both would have been discovered on the H100, on the clock.
+
+**1. `jax.device_put_replicated` is gone.** `ppo.train` calls it to replicate the training
+state across devices. JAX 0.11.2 removed the public alias as part of the `pmap` migration — not
+deprecated-with-a-warning but registered with a `None` handler, so touching it raises
+`AttributeError`. Brax 0.14.2 is the newest release and still calls it, so no version of the
+pair works as installed.
+
+The choice was between pinning JAX down to a release where the alias resolves, and restoring
+the one name. Pinning JAX changes the stack underneath MuJoCo 3.14, MJX-Warp and `warp-lang`
+1.17 — the stack M2's 2.6% parity and M3's 1.26M sim-steps/s were measured on, so all of those
+numbers would need re-measuring to still mean anything. The implementation was never deleted,
+only the alias: `jax._src.api.device_put_replicated` is present and correct. `compat.py`
+restores it, which is a monkeypatch on a dependency but has a blast radius of one name.
+
+**2. Brax cannot read back its own checkpoints.** `make_ppo_networks` has
+`mean_kernel_init_fn=None`, `network_config` captures it, and `save` deliberately leaves `None`
+alone — while `load_config` looks the stored value up unconditionally:
+
+```python
+networks.KERNEL_INITIALIZER[init_fn_name_]        # KeyError: None
+```
+
+So *every* PPO checkpoint this Brax writes is unreadable by its own `load_policy`. Binding that
+initialiser to something registered would dodge it, but that changes the network's
+initialisation to work around a serialisation bug. The registry is a plain name -> function
+dict and the stored `None` already means "no initialiser", so `compat.py` adds
+`KERNEL_INITIALIZER[None] = None` and the round trip agrees with itself. `save`'s reverse lookup
+never asks for that key, so nothing else changes.
+
+Both shims are covered by tests that assert the *upstream bug still exists*, so the day Brax or
+JAX fixes either one, the suite says the shim can go rather than silently keeping it forever.
+
+### Brax's eval metrics are episode sums, so M4's metric definitions were unreadable
+
+`EvalWrapper.step` accumulates `metric + metric * active_episodes` over the episode and
+`Evaluator.run_evaluation` divides by the episode length only for names ending in `_per_step`.
+M4 defined its metrics as levels, which under that aggregation log as nonsense:
+`eval/episode_cap_rotation` would be the area under the rotation curve, and
+`eval/episode_success` — a per-step "is past 4*pi" — would be a *step count*, so a W&B panel
+labelled "success" would read 37.2 and the M5 criterion would have no number at all.
+
+Every metric is now defined so that its episode sum is the quantity worth reading:
+
+| metric | per step | episode aggregate |
+|---|---|---|
+| `cap_rotation` | `d_theta` | net radians turned |
+| `cap_rotation_abs` | `|d_theta|` | gross radians turned |
+| `cap_angvel_per_step` | angular velocity | mean angular velocity (Brax divides) |
+| `success` | the 4*pi crossing | 1 for a successful episode |
+| `reward/<term>` | the term | that term's contribution to the return |
+
+This also makes `cap_rotation / cap_rotation_abs` a free exploit detector that is visible *during*
+training rather than only at eval: a gait scores near 1, a policy that turns the cap by shaking
+it back and forth scores near 0. The training progress line prints it every eval.
+
+The `success` metric is now the same upward crossing the reward bonus fires on, not a level, so
+the two can never disagree about what succeeded.
+
+### Four things `train.py` does that Playground's `train_jax_ppo.py` does not
+
+* **It binds `full_reset`.** `ppo.train` calls
+  `wrap_env_fn(env, episode_length=, action_repeat=, randomization_fn=)` and never passes
+  `full_reset`, so Playground's own script trains every env from the one state cached at the
+  first reset — the failure mode M4 found and set `full_reset=True` for. The config setting only
+  takes effect if it is bound onto the wrapper with `functools.partial`, which is what
+  `train.py` does and a test checks.
+* **It uploads checkpoints from `progress_fn`, not `policy_params_fn`.** Brax's eval loop runs
+  `policy_params_fn` -> `checkpoint.save` -> `run_evaluation` -> `progress_fn`. The checkpoint
+  for the current step does not exist yet when `policy_params_fn` fires, so the obvious hook
+  would ship the *previous* checkpoint every time — silently off by one eval, and off by one
+  eval is exactly what gets lost to a preemption.
+* **It subtracts the restored step count from the budget, and gives each attempt its own
+  checkpoint directory.** `restore_checkpoint_path` restores the normalizer and the policy and
+  value params and nothing else: `env_steps` restarts at zero and the Adam moments are
+  reinitialised. A naive `--resume` would therefore train a second full 150M steps. That part is
+  easy — the step count is recoverable from the directory name.
+
+  The part that is not easy is the consequence of `env_steps` restarting. Brax names a
+  checkpoint directory after `env_steps`, so a run resumed at 6,553,600 steps writes its *next*
+  checkpoint as `000000327680`. In one flat directory the stale 6.5M checkpoint stays the
+  largest name forever, so every later `--resume` would reload it and silently discard all the
+  work since — the exact failure the resume machinery exists to prevent, and invisible except as
+  a reward curve that keeps restarting from the same place.
+
+  Measured in the round-trip test, where the resumed attempt's budget happened to equal the
+  resume point: both checkpoints came out named `000000000160`, so a flat directory would not
+  merely have mis-sorted them, it would have **overwritten** the earlier one. So each attempt
+  writes into its own `checkpoints/from<offset>/`, the global step of a checkpoint is
+  `offset + int(name)`, and the layout records the resume history instead of flattening it.
+  `capturn/checkpoints.py` owns this and both scripts use it; a flat layout still reads, with
+  offset zero, so checkpoints from before this existed still load.
+
+  The Adam moments are the one real loss — Brax does not checkpoint the optimizer — and each
+  resume costs a short transient while they refill. Cheap once, expensive if the machine dies
+  every ten minutes.
+* **It keeps the run name deterministic.** `capturn-<phase>[-dr<scale>]-s<seed>`, not a
+  timestamp. The box is preemptible and its disk does not survive a stop, so `--resume` has to
+  find the W&B run *and* its checkpoint artifact without being told an id; a timestamped name
+  makes that impossible. The W&B run id is the run name, resumed with `resume="allow"`.
+
+A fourth thing, less a finding than a consequence of the first three: both W&B calls in
+`progress_fn` are wrapped. A failed `log_artifact` or `wandb.log` raising from inside a Brax
+callback would end the run — and the whole upload mechanism exists to survive the machine
+disappearing, so losing two hours of training to a transient network error while guarding
+against preemption would be a poor trade. A failed upload warns, leaves the checkpoint on disk,
+and is retried at the next eval, because `uploaded` is only marked on success.
+
+### `num_evals = 24`, because that is the checkpoint density
+
+Brax writes one checkpoint per eval, so `num_evals` *is* how often the run is saved, and the
+PRD asks for "every few minutes" because the machine can be killed with no warning. 150M steps
+at the M3 rate of 31,449 control-steps/s is about 80 minutes of simulation, so 24 evals is a
+checkpoint roughly every 3.5 minutes. Leap uses 10, which would be every 9.
+
+The 14 extra evals cost one eval rollout each: 1024 envs x 400 steps, about 30 s on the H100, so
+about 7 minutes added to a ~2 hour run. That buys itself back the first time the box is
+preempted. `--checkpoint-every MIN` re-derives `num_evals` if preemption turns out to be more or
+less frequent than expected, including on a `--resume`, where the remaining budget is shorter
+and the same minutes-per-checkpoint needs fewer evals.
+
+`deterministic_eval=True` as well. Brax and Playground both default it to False, which makes
+`eval/episode_*` a sample from the stochastic policy; the M5 criterion is about the policy that
+would be deployed, and `eval.py` reports that one, so the two should be measuring the same thing.
+
+### The eval env needs its own `naconmax`
+
+`naconmax` is a total across worlds (M2), and `ppo.train` vmaps the eval env over
+`num_eval_envs`, which is 1024 against training's 8192. One shared config either wastes buffer
+or — if `num_eval_envs` is ever raised above `num_envs` — silently overflows it and evaluates
+different physics from the physics that was trained. `train.py` builds two configs. `njmax` is
+per world and does not scale.
+
+### `eval.py` measures the second M5 criterion, not just the first
+
+The PRD asks for two things, and the second is the one a success rate cannot see: "rendered
+rollouts show real finger gaiting with no exploit (flicking, penetration, vibrating the cap)".
+Watching four videos is not a measurement over 1024 episodes, so `eval.py` reports four numbers
+that separate a gait from a policy that has found another way to turn the cap — none of which
+needs the contact buffer M4 ruled out:
+
+* **net / gross rotation.** `sum(d_theta) / sum(|d_theta|)`. Near 1 is one direction; near 0 is
+  the cap being shaken.
+* **regrips per gaiting fingertip.** A gait has to release the cap and come back. Counted with
+  hysteresis on the gap to the cap surface — holding below 10 mm, released above 20 mm, against
+  pregrasp gaps of 3.5/5.6/7.2 mm (M0) — so a tip resting at one threshold is not counted
+  hundreds of times. Zero regrips with a high success rate means the cap is being turned without
+  gaiting.
+* **wrist share of the joint travel.** The wrist is 2 of the 24 joints. If it is most of the
+  motion, the fingers are passengers and the policy is twisting its wrist.
+* **deepest penetration**, measured by replaying the saved trajectories through CPU MuJoCo with
+  `mj_forward` — the same measurement M1 and M2 reported, so it is comparable to the -0.566 mm
+  (CPU) and -0.104 mm (Warp) the open-loop gait managed.
+
+Episodes run under `VmapWrapper` only — no `EpisodeWrapper`, no auto-reset — for
+`episode_length` steps with a per-env alive mask. Brax's eval path auto-resets on termination
+and keeps stepping, so a dropped cap would silently contribute a second, partial episode to the
+averages. The alive mask gates the step *after* a termination, so the step on which the cap was
+dropped still counts.
+
+Success is "ever reached 4*pi", via a running maximum of the cumulative rotation, not "ended
+past 4*pi": a policy that overshoots and slips back a few degrees did succeed, and that is also
+the definition the reward bonus uses.
+
+### Deviations from the PRD
+
+| Spec | Built | Why |
+|---|---|---|
+| — | `capturn/compat.py` | Brax 0.14.2 and JAX 0.11.2 cannot train-then-load without two shims |
+| M4's `cap_rotation`, `cap_angvel` metrics | `d_theta`, `cap_angvel_per_step`, plus `cap_rotation_abs` | Brax sums eval metrics; levels log as nonsense |
+| `eval.py` reports "success rate" | plus four exploit measures | the PRD's second M5 criterion, measured over 1024 episodes instead of eyeballed over 4 videos |
+| 1000 eval episodes | 1024 | `--episodes` defaults to it; a power of two keeps one vmapped batch |
+| — | `eval.py` reports warp's overflow bitmask | M2's overflow check was run on the open-loop gait, which loads the contacts far more gently than a policy does |
+| — | `checkpoints/from<offset>/<step>` | a resumed run's checkpoints are named below the one they resumed from |
+| `train.py` renders rollouts at the end | it does not | `MUJOCO_GL=egl` breaks `import mujoco` on the Daytona image. `eval.py --save` writes `.npz` on the box, `render.py` makes the mp4 on the Mac |
+| `--load_checkpoint`, `--dr_scale` | `--load-checkpoint`, `--dr-scale` | hyphens, matching the other scripts in `scripts/` |
+| `--phase dr` works | it exits with a message until M7 | the env-level DR hooks are wired, but running the DR phase without `randomize.py`'s model-level ranges would quietly be a different experiment from the one the PRD asks for |
+
+Also: `scripts/sweep.py` (M6) is not built. `env.py` grew a public `tip_gaps` so `eval.py` can
+read the fingertip gaps without reaching into a private method.
+
+### Warp reports overflow on the Data, not as an exception
+
+M2's "no contact or constraint overflow" check was run on the open-loop gait, which presses the
+cap far more gently than early training does. Warp prints its warnings from inside kernels where
+Python cannot capture them, so an overflow during a 150M-step run would appear as a line in a
+tmux scrollback and nothing else. `eval.py` therefore carries the `OverflowType` bitmask out of
+the rollout the way `benchmark.py` and `check_parity.py` do, and separates the flags that
+invalidate the physics (`NEFC`, `NJMAX_NNZ`, `BROADPHASE`, `NARROWPHASE`, `CCD`, `NVMAX`) from
+the ones that only mean the solver worked hard.
+
+On the effectively-random `--smoke` policy: **no buffer overflow**, so M2's
+`naconmax = 44 * num_envs` and `njmax = 150` hold under a policy that is pressing much harder
+than the gait they were measured on. `EPA_HORIZON` does fire, which M2 already documented as a
+compile-time 24-entry warp limit that the model cannot configure.
+
+### Measured on the Mac, at `--smoke` sizes
+
+Not training numbers — a pipeline check. 160 steps at 8 envs, 2 evals, a 32x32 network:
+47.6 s of training (3 steps/s on warp-cpu), both evals logged, two checkpoints written, the
+last one loaded back by `eval.py` and rolled out. `eval.py` runs at the real
+`episode_length = 400` regardless of what the run was trained at, which is correct and is why
+it takes minutes locally.
+
+What that policy looks like through `eval.py`, as the floor every M5 number should be read
+against (8 episodes, deterministic):
+
+| | `--smoke` policy | M1 open-loop gait | target |
+|---|---|---|---|
+| success rate | 0.00% | — | > 80% |
+| net rotation | -73.9 deg | +89 deg | +720 deg |
+| mean angular velocity | -4.26 deg/s | 6.2 deg/s | 36 deg/s |
+| net / gross rotation | **-0.507** | — | near +1 |
+| regrips per episode (th / ff / mf) | 0.38 / 0.00 / 0.00 | — | several |
+| episodes with no regrip | 62.5% | — | near 0 |
+| wrist share of joint travel | 9.71% | — | roughly 8% (2 of 24 joints) |
+| drop rate | 25.0% | — | low |
+| deepest penetration | -4.531 mm | -0.566 mm (CPU) | near M1 |
+| warp buffer overflow | none | none | none |
+
+The signs are what matter: an untrained policy turns the cap the *wrong* way on average and
+scores -0.5 on net/gross, i.e. it has no consistent direction at all, which is exactly what the
+measure is supposed to say. The wrist share lands at 9.7% against the 8.3% a uniform policy
+would give, so the baseline is roughly proportionate and the measure has room to detect a
+wrist-twisting exploit.
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
@@ -747,6 +992,23 @@ later instance; `CapTurn` defaults to `None` and builds a fresh config.
   support and get at most one contact point. Those are finger *links* against the cap and
   hand self-collisions; the fingertip/cap pair (mesh/mesh) is unaffected. Re-check if the policy
   starts using the middle phalanges to turn the cap.
+- **Does the nominal run clear 80%?** The M5 criterion, unanswered: nothing here has trained.
+  Everything that produces the number is built and round-tripped on warp-cpu; what is missing
+  is about two hours of H100 time. Watch `eval/episode_success` and
+  `cap_rotation / cap_rotation_abs` in W&B from the first eval -- the second one says whether a
+  rising success rate is a gait or an exploit, without waiting for a video.
+- **Does an untrained policy press hard enough to matter?** The `--smoke` policy (160 steps,
+  effectively random) reached **-4.5 mm** of penetration against the open-loop gait's -0.566 mm
+  on CPU, and warp printed `EPA_HORIZON` during the eval rollout. M2's overflow check was run on
+  the open-loop gait, which loads the contacts far more gently than early training does. Not
+  obviously a problem -- deep penetration under a flailing policy is expected and the fingertips
+  are meshes -- but it means the M2 result does not cover the first few million steps.
+  `eval.py` now carries the overflow bitmask out of the rollout and flags buffer overflow
+  separately from solver flags, so this is visible rather than inferred. Check it on the first
+  real checkpoint.
+- Is `action_scale = 0.1` rad per control step enough authority to gait at 36 deg/s? Untouched
+  since the PRD. Related to the threshold question below: if the policy saturates its delta
+  every step and still falls short, this is the knob, not the reward.
 - Is 4*pi in 20 s the right success threshold? **The gap widened at M2.** The open-loop gait now
   reaches 6.2 deg/s at the converged timestep against the 36 deg/s the criterion needs -- a
   factor of 6, where before the timestep fix it looked like a factor of 4. The measured torque
@@ -762,6 +1024,8 @@ later instance; `CapTurn` defaults to `None` and builds a fresh config.
   anything, or should it be raised, or dropped in favour of the dense rotate term alone?
 - What goes in the 12-slot DR parameter block at M7? The slot exists and is zeroed; the
   per-joint `qpos0` offsets are deliberately left out of it.
+- ~~How often should the run checkpoint?~~ **Closed at M5**: `num_evals = 24`, a checkpoint
+  every ~3.5 min, costing ~7 min of eval in a ~2 h run.
 - ~~Is `sim_dt = 0.00125` affordable?~~ **Closed at M3**: 2.31x, about 30 extra minutes of
   simulation per 100M env-steps. It stands.
 - ~~What is `num_envs`?~~ **Closed at M3**: 8192.

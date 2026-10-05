@@ -88,7 +88,13 @@ def ppo_config(env_config: config_dict.ConfigDict | None = None) -> config_dict.
     env_config = env_config if env_config is not None else default_config()
     return config_dict.create(
         num_timesteps=150_000_000,
-        num_evals=10,
+        # M5: Brax writes one checkpoint per eval, so `num_evals` *is* the checkpoint density,
+        # and the PRD wants one every few minutes because the box is preemptible. 150M steps at
+        # the M3 rate of 31,449 control-steps/s is about 80 minutes of simulation, so 24 evals
+        # is a checkpoint every ~3.5 min. Leap uses 10; the extra 14 cost one eval rollout each
+        # (1024 envs x 400 steps, ~30 s on the H100), which buys back more than it spends the
+        # first time the machine is killed. `train.py --checkpoint-every MIN` re-derives it.
+        num_evals=24,
         num_envs=NUM_ENVS,
         num_eval_envs=1024,  # PRD M5 judges success over 1000 eval episodes
         episode_length=env_config.episode_length,
@@ -103,6 +109,11 @@ def ppo_config(env_config: config_dict.ConfigDict | None = None) -> config_dict.
         entropy_cost=1e-2,
         discounting=0.97,
         num_resets_per_eval=1,
+        # M5: Brax defaults this to False, and so does Playground, which makes
+        # `eval/episode_*` a sample from the stochastic policy. The M5 criterion is about the
+        # policy that would be deployed, and `eval.py` reports the deterministic one, so the
+        # two numbers should be measuring the same thing.
+        deterministic_eval=True,
         # M4: the auto-reset wrapper restores `data` but not `info` at an episode boundary, and
         # with `full_reset=False` every env also restarts from the single start state cached at
         # the first reset -- 8192 start states for a 150M-step run. `env.py` is written to be
