@@ -19,16 +19,21 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sys
 
 import mujoco
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SCENE = ROOT / "assets" / "scene.xml"
-DEFAULT_TRAJECTORY = ROOT / "artifacts" / "squeeze_twist.npz"
+sys.path.insert(0, str(ROOT))
+# The scene path and the cap geometry live in `capturn.scene` so the env and these CPU scripts
+# cannot drift apart about where the cap wall is. Re-exported here, because `squeeze_twist.py`,
+# `fit_pregrasp.py` and the tests all import them from this module.
+from capturn.scene import (  # noqa: E402
+    ALL_TIPS, GAIT_TIPS, SCENE, cap_dimensions, surface_distance,
+)
 
-GAIT_TIPS = ("rh_th_tip", "rh_ff_tip", "rh_mf_tip")
-ALL_TIPS = GAIT_TIPS + ("rh_rf_tip", "rh_lf_tip")
+DEFAULT_TRAJECTORY = ROOT / "artifacts" / "squeeze_twist.npz"
 
 
 def load(key: str = "pregrasp") -> tuple[mujoco.MjModel, mujoco.MjData]:
@@ -39,35 +44,15 @@ def load(key: str = "pregrasp") -> tuple[mujoco.MjModel, mujoco.MjData]:
     return model, data
 
 
-def cap_dimensions(model: mujoco.MjModel) -> tuple[float, float]:
-    """The cap's outer radius and half-height.
-
-    `geom_size` is all zeros for a mesh geom, so read the mesh vertices when the cap is the
-    16-sided prism and `geom_size` when it is a primitive. Everything that reasons about the cap
-    wall goes through here, so the geometry can change without silently zeroing a radius.
-    """
-    cap = model.geom("cap").id
-    if model.geom_type[cap] != mujoco.mjtGeom.mjGEOM_MESH:
-        return float(model.geom_size[cap, 0]), float(model.geom_size[cap, 1])
-    mesh = model.geom_dataid[cap]
-    start = model.mesh_vertadr[mesh]
-    verts = np.array(model.mesh_vert[start:start + model.mesh_vertnum[mesh]], dtype=float)
-    # The compiler re-frames mesh vertices and puts the correction on the geom, so the raw
-    # vertices are not in the geom frame -- for this cap they come back with the prism axis
-    # along x. Rotate them back before measuring, or the "radius" reads 17.9 mm.
-    rot = np.zeros(9)
-    mujoco.mju_quat2Mat(rot, np.asarray(model.geom_quat[cap], dtype=float))
-    local = verts @ rot.reshape(3, 3).T + model.geom_pos[cap]
-    return float(np.linalg.norm(local[:, :2], axis=1).max()), float(np.abs(local[:, 2]).max())
-
-
 def cap_surface_distance(model: mujoco.MjModel, data: mujoco.MjData, site: str) -> float:
-    """Distance from a site to the cap's lateral surface, in the cap frame."""
-    radius, half_h = cap_dimensions(model)
+    """Distance from a site to the cap's surface, from an `MjData`.
+
+    The env gets the same number from the fingertip `framepos` sensors, which are already in the
+    cap frame; here the site has to be rotated into it first.
+    """
     rel = data.site(site).xpos - data.site("cap_site").xpos
-    cap_mat = data.site("cap_site").xmat.reshape(3, 3)
-    local = cap_mat.T @ rel
-    return float(np.hypot(np.linalg.norm(local[:2]) - radius, max(0.0, abs(local[2]) - half_h)))
+    local = data.site("cap_site").xmat.reshape(3, 3).T @ rel
+    return float(surface_distance(local, *cap_dimensions(model)))
 
 
 def report(model: mujoco.MjModel, data: mujoco.MjData) -> None:

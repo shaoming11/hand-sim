@@ -581,6 +581,156 @@ second independent data point.
 
 ---
 
+## M4 — env
+
+`capturn/env.py` (the `MjxEnv` subclass), `capturn/config.py` (env + PPO config) and
+`capturn/scene.py` (the scene path and cap geometry, shared with the M0 scripts so there is one
+definition of where the cap wall is). Acceptance checks in `tests/test_env.py`: 12 in the
+default suite, 6 behind `HAND_SIM_SLOW=1`.
+
+All four PRD M4 criteria met. Reset and step are jittable, and also vmap-able and scannable;
+observation shapes are fixed at `state` 210 / `privileged_state` 283; every reward term is
+finite; 1000 random-action control steps run with no NaN (377 s on the Mac, one env).
+
+### `impl='jax'` is not available at all — the PRD's local test plan does not work
+
+The PRD says to use `impl='jax'` for CPU smoke tests of env logic. It cannot load this scene:
+
+```
+NotImplementedError: (mjtGeom.mjGEOM_CYLINDER, mjtGeom.mjGEOM_MESH) collisions not implemented
+```
+
+The bottle neck is a cylinder and every fingertip is a mesh. So warp-cpu is the only local
+backend, at roughly **0.35 s per control step** for one env (40 substeps, ~114 sim-steps/s).
+That is why the physics-stepping tests are opt-in rather than in the default suite.
+
+Warp is trustworthy for observations, which was not previously checked: at the pregrasp pose all
+9 sensors agree with CPU MuJoCo to **4.5e-8**, `framepos`/`framezaxis` with a site `reftype`
+included. The env reads every task quantity through sensors rather than recomputing frames.
+
+### Observation layout
+
+One actor frame is 70 numbers; `state` is the last 3, newest first.
+
+| Block | Size | Note |
+|---|---|---|
+| hand joint positions | 24 | + noise, zero in the nominal phase |
+| previous action | 20 | |
+| position targets | 20 | `data.ctrl`, the realized targets |
+| cap position, palm frame | 3 | + noise |
+| cap axis, palm frame | 3 | |
+
+`privileged_state` is that whole 210-number history plus 73:
+
+| Block | Size |
+|---|---|
+| hand joint velocities | 24 |
+| cumulative cap rotation | 1 |
+| cap angular velocity | 1 |
+| fingertip positions in the cap frame, all five | 15 |
+| actuator forces | 20 |
+| DR parameter slot | 12 |
+
+The actor cannot see the cap angle, and this is now a test rather than an assumption: rotating
+the cap by 1 rad leaves the actor frame bit-identical. `cap_position` and `cap_axis` are read
+off `cap_site`, which sits on the hinge axis, so neither reveals rotation.
+
+### Three things that would have corrupted M5 silently
+
+**1. `BraxAutoResetWrapper` restores `data` but not `info`.** With the default
+`full_reset=False` it swaps `data` and `obs` for a cached copy at an episode boundary and leaves
+`info` untouched. Anything in `info` that evolves *during* an episode is therefore stale on the
+first step of the next one — and for this task that list is dangerous: the action integrator's
+target, the cumulative-rotation counter, a success latch. A stale rotation counter means the
+success bonus latches on in episode 1 and never resets.
+
+The fix is a rule, not a patch: **`info` holds only per-episode constants, and everything that
+evolves is derived from `data`.**
+
+* the integrator's previous target is `data.ctrl` — which is also the physical truth, not a copy
+* cumulative rotation is `cap_angle - cap_angle_init`, and because `info` and the cached reset
+  state both come from the same single `reset` call, those two stay consistent forever
+* success is recomputed from that rotation each step instead of latched
+
+Three fields are exceptions, because they genuinely evolve and have nowhere else to live:
+`last_act`/`last_last_act`/`action_buffer` behind the action-rate cost, and `last_cap_angle`
+behind the finite difference in the rotate reward. Stale, they cost one spurious action-rate
+term per episode -- as in Playground's own envs -- and one rotate term, which that term's clip
+bounds at -0.5 no matter how far the previous episode turned. With `full_reset=True` (the
+configured default) `info` is reset too and none of it arises.
+
+The regression test drives two envs with a constant action for two short episodes and asserts
+the second is a numerical repeat of the first, which no cached state would survive.
+
+**2. With `full_reset=False` the reset randomisation is frozen after episode 1.** The cached
+reset state is the one built at the first `reset`, so each env restarts from its own single
+start state for the whole run — `num_envs` start states for a 150M-step run, and under a
+deterministic policy each env replays one episode forever (measured: `cap_angle_init` never
+changes, and the rotation trace repeats exactly). The PRD asks for hand jitter and a random cap
+angle every episode, so `ppo_config()` sets **`full_reset=True`**. It costs a `reset` per
+episode end. `env.py` is correct either way; only the randomisation depends on it.
+
+**3. `mjx.make_data` leaves `sensordata` zeroed.** Playground's Leap env builds its first
+observation straight out of `make_data`, so its first frame reports the cube at the origin. This
+env runs one `mjx.forward` in `reset` — a fortieth of a control step — and the test asserts the
+cap position in the first frame is not the origin.
+
+### Reward balance, measured
+
+200 control steps from the pregrasp pose, one env, nominal config. Mean of each term *after* its
+weight, and its share of the total absolute signal.
+
+| Term | Weight | Zero action | share | Random action | share |
+|---|---|---|---|---|---|
+| rotate | 1.0 | +0.00032 | 0.1% | +0.01388 | 3.8% |
+| reach | 0.5 | +0.44625 | **99.9%** | +0.21863 | **59.5%** |
+| action_rate | -0.01 | -0.00000 | 0.0% | -0.13416 | **36.5%** |
+| torques | -1e-3 | -0.00013 | 0.0% | -0.00043 | 0.1% |
+| joint_vel | -1e-4 | -0.00000 | 0.0% | -0.00035 | 0.1% |
+| success | 10.0 | 0 | — | 0 | — |
+| **reward / step** | | **+0.02232** | | **+0.00488** | |
+| **return over 400 steps** | | **+8.93** | | **+1.95** | |
+
+Two risks for M5, both from the PRD's starting weights:
+
+* **`reach` pays for doing nothing.** Holding the pregrasp pose earns 8.93 per episode while
+  turning the cap 0.18 deg. A successful episode is worth roughly 21 by the same arithmetic
+  (4*pi of rotate return is 12.6, since the rotate term integrates to radians turned, plus
+  about 8 of reach and 0.5 of bonus). A 2.4x gap in favour of succeeding, against a risk-free
+  alternative, is thinner than it looks. First knob to try: drop `reach` to 0.1–0.2, or gate it
+  so it only pays while the cap is turning.
+* **`action_rate` is 36% of the signal for a high-entropy policy**, comparable to `reach` and
+  ten times `rotate`. Early in training that pressure points at freezing, against
+  `entropy_cost = 1e-2` pushing the other way.
+
+Random flailing turns the cap 7.95 deg in 10 s (0.8 deg/s), against 6.2 deg/s for the M1
+open-loop gait. So noise does not accidentally solve the task, and nothing terminated in 400
+steps of either rollout — the 10 cm drop condition does not fire spuriously.
+
+### Deviations from the PRD
+
+| Spec | Built | Why |
+|---|---|---|
+| `sim_dt = 0.005` | 0.00125 | M2: not converged |
+| `impl='jax'` for local tests | warp-cpu only | cylinder/mesh collisions unimplemented |
+| `discounting = 0.99` | 0.97 | installed `manipulation_params.py` is the authority; 0.97 is still a 1.7 s horizon |
+| reward = sum of terms | sum × `ctrl_dt` | Playground's convention, which the borrowed PPO hyperparameters were tuned against. Uniform, so the relative weighting is unchanged; the one consequence is that the one-time success bonus is worth 0.5 of return, not 10 |
+| critic obs = "actor obs plus ..." | the full 210-frame history plus 73 | read literally. Leap passes only the current frame; duplicating 210 inputs into a 512-wide critic costs nothing and makes the layout checkable |
+| reach to the cap "rim" | to the cap *surface* | the same quantity M0 and M1 reported as "gap to cap surface"; rounds off at the rim rather than jumping |
+| critic sees "cap angle (unwrapped)" | cumulative rotation | same quantity minus the episode's random start offset, so it starts at 0 instead of somewhere in [0, 2*pi) |
+| success = "one-time bonus" | upward crossing of 4*pi | a latch would be exactly one-time but it evolves, so it would go stale *high* under `full_reset=False` and then never fire — silent, and worse than a bonus that can fire twice if the cap oscillates across the threshold |
+| "fingertip positions relative to the cap" | all five | the sensors already exist; the ring and little fingers do not gait but the critic may as well see them |
+| 1000 eval episodes | `num_eval_envs = 1024` | |
+| — | no termination penalty | the PRD's reward table has none. Dropping the cap already forfeits the rest of the episode. First thing to add if the policy learns to bail |
+
+Smaller notes: the PRD's `randomization_fn(model, rng)` signature is not what the wrapper calls —
+`BraxDomainRandomizationVmapWrapper` calls `randomization_fn(model)` and Playground binds `rng`
+with `functools.partial`. The wrapper also swaps `env._mjx_model` for the per-env randomized
+model inside the vmap, so at M7 `env.py` can fill the DR slot by reading `self._mjx_model`
+directly rather than threading parameters through `info`. And Playground's envs take
+`default_config()` as a *default argument*, so `config_overrides` mutates a dict shared by every
+later instance; `CapTurn` defaults to `None` and builds a fresh config.
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
@@ -601,7 +751,17 @@ second independent data point.
   reaches 6.2 deg/s at the converged timestep against the 36 deg/s the criterion needs -- a
   factor of 6, where before the timestep fix it looked like a factor of 4. The measured torque
   ceiling (0.157 N*m vs 0.05 N*m of thread friction) still says a trained policy can get there,
-  but this should be checked against real policy numbers at M5 rather than assumed.
+  but this should be checked against real policy numbers at M5 rather than assumed. M4 adds a
+  lower bound for scale: random actions manage 0.8 deg/s.
+- Does `reach` at 0.5 create a do-nothing optimum? Measured at M4: holding the pregrasp pose is
+  worth 8.93 of return against roughly 21 for succeeding, and `reach` is 99.9% of the reward
+  signal at the start. The first weight to touch if M5 stalls with the hand parked on the cap.
+- Is `action_rate` at 0.01 too strong early? It is 36% of the absolute signal for a
+  high-entropy policy and ten times `rotate`, which points at freezing.
+- Is a success bonus worth 0.5 of return (10.0 before the `ctrl_dt` multiply) enough to shape
+  anything, or should it be raised, or dropped in favour of the dense rotate term alone?
+- What goes in the 12-slot DR parameter block at M7? The slot exists and is zeroed; the
+  per-joint `qpos0` offsets are deliberately left out of it.
 - ~~Is `sim_dt = 0.00125` affordable?~~ **Closed at M3**: 2.31x, about 30 extra minutes of
   simulation per 100M env-steps. It stands.
 - ~~What is `num_envs`?~~ **Closed at M3**: 8192.

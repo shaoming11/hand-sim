@@ -1,0 +1,347 @@
+"""M4: the training environment -- a Playground `MjxEnv` that unscrews the cap.
+
+Structure mirrors Playground's `LeapCubeRotateZAxis`, which the PRD names as the template. The
+task differs in one way that drives most of the design: the cap's hinge angle is *cumulative*,
+so the thing being rewarded is progress along an unbounded coordinate rather than a velocity to
+be held. That makes the episode's start angle a per-episode constant the reward has to subtract,
+and it is why the notes below care so much about what survives an auto-reset.
+
+Observations
+------------
+One actor frame is 70 numbers, and `state` is the last `history_len` (3) of them, newest first:
+
+    hand joint positions      24   + observation noise (zero in the nominal phase)
+    previous action           20
+    position targets          20   `data.ctrl`, the realized targets
+    cap position, palm frame   3   + observation noise
+    cap axis, palm frame       3
+
+`privileged_state` is that whole history followed by 73 more:
+
+    hand joint velocities     24
+    cumulative cap rotation    1   unwrapped, relative to this episode's start angle
+    cap angular velocity       1
+    fingertip positions       15   all five, in the cap frame
+    actuator forces           20
+    DR parameter slot         12   zeros until M7 fills it
+
+The actor deliberately cannot see the cap angle. The cap is rotationally symmetric, so the
+policy does not need it and could not measure it on hardware.
+
+Auto-reset and what may live in `info`
+--------------------------------------
+Playground's `BraxAutoResetWrapper` with `full_reset=False` restores `data` and `obs` at an
+episode boundary but leaves `info` alone. Anything in `info` that *evolves during* an episode is
+therefore stale on the first step of the next one. Both `info` and the cached reset state come
+from the same single `reset` call, so per-episode *constants* in `info` stay consistent forever.
+
+So the rule here is: `info` holds only per-episode constants (`cap_angle_init`, `action_delay`,
+`dr_params`), and everything that evolves is derived from `data`:
+
+* the integrator's previous target is `data.ctrl`, not a copy in `info`
+* cumulative rotation is `cap_angle - cap_angle_init`, both consistent across a reset
+* success is recomputed from that rotation rather than latched in a flag
+
+Three fields are exceptions -- `last_act`, `last_last_act` and `action_buffer`, which feed the
+action-rate cost, and `last_cap_angle`, which feeds the finite difference behind the rotate
+reward. They genuinely evolve and have nowhere else to live. Stale, they cost one spurious
+action-rate term on the first step of an episode (as in Playground's own envs) and one rotate
+term, which the term's own clip bounds at -0.5 however far the previous episode had turned.
+`ppo_config()` sets `full_reset=True`, where `info` is reset too and none of this arises; the
+separate and stronger reason for that setting is that the reset randomisation is otherwise
+frozen after the first episode.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Union
+
+import jax
+import jax.numpy as jp
+import mujoco
+import numpy as np
+from ml_collections import config_dict
+from mujoco import mjx
+from mujoco_playground._src import mjx_env
+
+from capturn import scene
+from capturn.config import default_config
+
+N_HAND_JOINTS = 24
+N_ACTUATORS = 20
+# Zeros in the nominal phase. Sized for the eight model-level scalars in the PRD's DR table plus
+# the bottle's 3-vector offset and its tilt: fingertip friction, cap friction, cap frictionloss,
+# cap damping, actuator gain, hand damping, hand frictionloss, hand armature, bottle_pos (3),
+# bottle tilt. The per-joint `qpos0` offsets are left out -- 24 more numbers would dominate the
+# slot, and a critic can infer a joint offset from the joint's own behaviour.
+DR_PARAM_SLOTS = 12
+
+FRAME_SIZE = N_HAND_JOINTS + N_ACTUATORS + N_ACTUATORS + 3 + 3  # 70
+PRIVILEGED_EXTRA = (
+    N_HAND_JOINTS + 1 + 1 + 3 * len(scene.ALL_TIPS) + N_ACTUATORS + DR_PARAM_SLOTS
+)  # 73
+
+
+class CapTurn(mjx_env.MjxEnv):
+    """Shadow Hand unscrewing a bottle cap by finger gaiting."""
+
+    def __init__(
+        self,
+        config: Optional[config_dict.ConfigDict] = None,
+        config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+    ) -> None:
+        # Built fresh rather than taken as a default argument: Playground's envs default to a
+        # module-level `default_config()` instance, and `config_overrides` then mutates that
+        # shared dict for every later instance.
+        super().__init__(default_config() if config is None else config, config_overrides)
+
+        self._xml_path = scene.SCENE.as_posix()
+        self._mj_model = mujoco.MjModel.from_xml_path(self._xml_path)
+        self._mj_model.opt.timestep = self._config.sim_dt
+        # Unlike Playground's Leap base class this does *not* touch `ccd_iterations`. The
+        # scene's 50 / 1e-8 is an M1 finding: every fingertip here is a mesh against a mesh cap,
+        # and at Leap's setting of 10 the tips sink 7.4 mm in rather than 1.3 mm.
+        self._mj_model.vis.global_.offwidth = 3840
+        self._mj_model.vis.global_.offheight = 2160
+
+        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+        self._post_init()
+
+    def _post_init(self) -> None:
+        m = self._mj_model
+
+        # Read names from the compiled model; never hardcode indices.
+        hand_joints = [
+            m.joint(j).name for j in range(m.njnt) if m.joint(j).name != scene.CAP_JOINT
+        ]
+        if len(hand_joints) != N_HAND_JOINTS:
+            raise ValueError(f"expected {N_HAND_JOINTS} hand joints, found {len(hand_joints)}")
+        self._hand_qids = mjx_env.get_qpos_ids(m, hand_joints)
+        self._hand_dqids = mjx_env.get_qvel_ids(m, hand_joints)
+        self._cap_qid = int(m.joint(scene.CAP_JOINT).qposadr[0])
+
+        limits = np.array([m.joint(j).range for j in hand_joints], dtype=float)
+        unlimited = np.array([not m.joint(j).limited for j in hand_joints], dtype=bool)
+        limits[unlimited] = (-np.inf, np.inf)
+        self._joint_lowers, self._joint_uppers = jp.array(limits[:, 0]), jp.array(limits[:, 1])
+
+        key = m.keyframe("pregrasp")
+        self._init_q = jp.array(key.qpos)
+        self._init_ctrl = jp.array(key.ctrl)
+        lowers, uppers = m.actuator_ctrlrange.T
+        self._lowers, self._uppers = jp.array(lowers), jp.array(uppers)
+
+        self._cap_radius, self._cap_half_height = scene.cap_dimensions(m)
+        self._buffer_len = int(self._config.action_delay.max_steps) + 1
+
+    # ---------------------------------------------------------------------------------
+    # rollout
+    # ---------------------------------------------------------------------------------
+    def reset(self, rng: jax.Array) -> mjx_env.State:
+        rng, hand_rng, cap_rng, delay_rng = jax.random.split(rng, 4)
+
+        jitter = self._config.reset_noise.hand_qpos
+        q_hand = jp.clip(
+            self._init_q[self._hand_qids]
+            + jax.random.uniform(hand_rng, (N_HAND_JOINTS,), minval=-jitter, maxval=jitter),
+            self._joint_lowers,
+            self._joint_uppers,
+        )
+        cap_angle = jax.random.uniform(cap_rng, (), maxval=self._config.reset_noise.cap_angle)
+
+        qpos = self._init_q.at[self._hand_qids].set(q_hand).at[self._cap_qid].set(cap_angle)
+        data = mjx_env.make_data(
+            self._mj_model,
+            qpos=qpos,
+            qvel=jp.zeros(self.mjx_model.nv),
+            # The keyframe's `ctrl` is the fitted target that holds the pregrasp pose, and it is
+            # also the integrator's starting point. Only `qpos` is jittered: the policy moves
+            # the target from step one anyway, so jittering both would just add a transient.
+            ctrl=self._init_ctrl,
+            impl=self._mjx_model.impl.value,
+            naconmax=self._config.naconmax,
+            njmax=self._config.njmax,
+        )
+        # Playground's Leap env reads its sensors straight out of `make_data`, where
+        # `sensordata` is still zeros, so its first observation of the cube is fiction. One
+        # forward pass costs a fortieth of a control step and makes the first frame real.
+        data = mjx.forward(self.mjx_model, data)
+
+        if self._config.action_delay.enabled:
+            delay = jax.random.randint(delay_rng, (), 0, self._buffer_len)
+        else:
+            delay = jp.zeros((), dtype=jp.int32)
+
+        info = {
+            "rng": rng,
+            # per-episode constants -- safe to keep here across an auto-reset
+            "cap_angle_init": cap_angle,
+            "action_delay": delay,
+            "dr_params": jp.zeros(DR_PARAM_SLOTS),
+            # evolving, and stale for one step when `full_reset=False`
+            "last_act": jp.zeros(N_ACTUATORS),
+            "last_last_act": jp.zeros(N_ACTUATORS),
+            "action_buffer": jp.zeros((self._buffer_len, N_ACTUATORS)),
+            "last_cap_angle": cap_angle,
+        }
+
+        metrics = {f"reward/{k}": jp.zeros(()) for k in self._config.reward_config.scales}
+        metrics["cap_rotation"] = jp.zeros(())
+        metrics["cap_angvel"] = jp.zeros(())
+        metrics["success"] = jp.zeros(())
+
+        obs = self._get_obs(data, info, jp.zeros(self._config.history_len * FRAME_SIZE))
+        return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
+
+    def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+        info = state.info
+
+        # The *action* is delayed, not the target, so a delayed step still integrates exactly
+        # once. Index 0 is the newest action; nominal reads index 0 and is therefore undelayed.
+        buffer = jp.roll(info["action_buffer"], shift=1, axis=0).at[0].set(action)
+        effective = buffer[info["action_delay"]]
+
+        # The previous target is `data.ctrl` rather than a field in `info`, so that an episode
+        # that starts from a restored `data` also starts from that data's target.
+        target = jp.clip(
+            state.data.ctrl + self._config.action_scale * effective, self._lowers, self._uppers
+        )
+        data = mjx_env.step(self.mjx_model, state.data, target, self.n_substeps)
+
+        cap_angle = self._cap_angle(data)
+        d_theta = cap_angle - info["last_cap_angle"]
+        rotation = cap_angle - info["cap_angle_init"]
+
+        done = self._get_termination(data)
+        rewards = self._get_reward(data, action, info, d_theta, rotation)
+        rewards = {k: v * self._config.reward_config.scales[k] for k, v in rewards.items()}
+        # Playground's convention: the terms are rates and the sum is integrated over the
+        # control period. The rotate term is then literally radians turned this step.
+        reward = sum(rewards.values()) * self.dt
+
+        info["action_buffer"] = buffer
+        info["last_last_act"] = info["last_act"]
+        info["last_act"] = action
+        info["last_cap_angle"] = cap_angle
+
+        # Built after `last_act` is updated, so the frame carries the action that produced the
+        # state it describes. Playground's Leap env builds it before, and is one step behind.
+        obs = self._get_obs(data, info, state.obs["state"])
+
+        for k, v in rewards.items():
+            state.metrics[f"reward/{k}"] = v
+        state.metrics["cap_rotation"] = rotation
+        state.metrics["cap_angvel"] = self._cap_angvel(data)
+        state.metrics["success"] = (rotation >= self._config.success_rotation).astype(float)
+
+        return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
+
+    # ---------------------------------------------------------------------------------
+    # observation, reward, termination
+    # ---------------------------------------------------------------------------------
+    def _get_obs(
+        self, data: mjx.Data, info: Dict[str, Any], history: jax.Array
+    ) -> Dict[str, jax.Array]:
+        joint_pos = data.qpos[self._hand_qids]
+        cap_pos = self._sensor(data, "cap_position")
+        cap_axis = self._sensor(data, "cap_axis")
+
+        info["rng"], joint_rng, cap_rng = jax.random.split(info["rng"], 3)
+        level = self._config.noise_config.level
+        scales = self._config.noise_config.scales
+        joint_pos = joint_pos + level * scales.joint_pos * jax.random.uniform(
+            joint_rng, joint_pos.shape, minval=-1.0, maxval=1.0
+        )
+        cap_pos = cap_pos + level * scales.cap_pos * jax.random.uniform(
+            cap_rng, cap_pos.shape, minval=-1.0, maxval=1.0
+        )
+
+        frame = jp.concatenate([joint_pos, info["last_act"], data.ctrl, cap_pos, cap_axis])
+        history = jp.roll(history, frame.size).at[: frame.size].set(frame)
+
+        rotation = self._cap_angle(data) - info["cap_angle_init"]
+        privileged = jp.concatenate([
+            history,
+            data.qvel[self._hand_dqids],
+            rotation[None],
+            self._cap_angvel(data)[None],
+            self._tip_positions(data, scene.ALL_TIP_SENSORS).reshape(-1),
+            data.actuator_force,
+            info["dr_params"],
+        ])
+        return {"state": history, "privileged_state": privileged}
+
+    def _get_reward(
+        self,
+        data: mjx.Data,
+        action: jax.Array,
+        info: Dict[str, Any],
+        d_theta: jax.Array,
+        rotation: jax.Array,
+    ) -> Dict[str, jax.Array]:
+        gaps = self._tip_gaps(data)
+        threshold = self._config.success_rotation
+        # Fires on the control step that crosses the threshold going forward. A latch in `info`
+        # would be exactly one-time, but it evolves during the episode and so would go stale
+        # high under `full_reset=False` and then never fire again -- silently, which is worse
+        # than a bonus that can fire twice if the cap happens to oscillate across 4*pi.
+        crossed = (rotation >= threshold) & (rotation - d_theta < threshold) & (d_theta > 0)
+        return {
+            "rotate": jp.clip(d_theta / self.dt, -0.5, 2.0),
+            "reach": jp.exp(-self._config.reward_config.reach_sharpness * jp.mean(gaps)),
+            "action_rate": jp.sum(jp.square(action - info["last_act"])),
+            "torques": jp.sum(jp.square(data.actuator_force)),
+            "joint_vel": jp.sum(jp.square(data.qvel[self._hand_dqids])),
+            "success": crossed.astype(float),
+        }
+
+    def _get_termination(self, data: mjx.Data) -> jax.Array:
+        nan = ~jp.isfinite(data.qpos).all() | ~jp.isfinite(data.qvel).all()
+        if not self._config.early_termination:
+            return nan
+        dropped = (self._tip_gaps(data) > self._config.drop_distance).all()
+        return nan | dropped
+
+    # ---------------------------------------------------------------------------------
+    # sensor readings
+    # ---------------------------------------------------------------------------------
+    def _sensor(self, data: mjx.Data, name: str) -> jax.Array:
+        return mjx_env.get_sensor_data(self.mj_model, data, name)
+
+    def _cap_angle(self, data: mjx.Data) -> jax.Array:
+        """The hinge angle, as a scalar. Does not wrap, so it is the cumulative angle."""
+        return self._sensor(data, "cap_angle")[0]
+
+    def _cap_angvel(self, data: mjx.Data) -> jax.Array:
+        return self._sensor(data, "cap_angvel")[0]
+
+    def _tip_positions(self, data: mjx.Data, sensors: tuple[str, ...]) -> jax.Array:
+        """Fingertip positions in the cap frame, (len(sensors), 3)."""
+        return jp.stack([self._sensor(data, s) for s in sensors])
+
+    def _tip_gaps(self, data: mjx.Data) -> jax.Array:
+        """Gap from each gaiting fingertip to the cap surface, (3,)."""
+        return scene.surface_distance(
+            self._tip_positions(data, scene.GAIT_TIP_SENSORS),
+            self._cap_radius,
+            self._cap_half_height,
+        )
+
+    # ---------------------------------------------------------------------------------
+    # accessors
+    # ---------------------------------------------------------------------------------
+    @property
+    def xml_path(self) -> str:
+        return self._xml_path
+
+    @property
+    def action_size(self) -> int:
+        return self._mjx_model.nu
+
+    @property
+    def mj_model(self) -> mujoco.MjModel:
+        return self._mj_model
+
+    @property
+    def mjx_model(self) -> mjx.Model:
+        return self._mjx_model
