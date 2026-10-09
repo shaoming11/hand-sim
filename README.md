@@ -5,13 +5,27 @@ milestone at a time; deviations, measured numbers and open questions live in
 [`NOTES.md`](NOTES.md).
 
 Status: **M0** (scene), **M1** (open-loop feasibility), **M2** (MJX parity), **M3** (benchmark)
-and **M4** (the env) done. **`num_envs = 8192`**, `sim_dt = 0.00125` -- 1.26M sim-steps/s,
-1,572x realtime, 8% of an 80 GB GPU on the H100.
+and **M4** (the env) done. **`num_envs = 8192`**, `sim_dt = 0.00125` -- 3.52M sim-steps/s,
+**4,405x realtime** on an RTX PRO 6000 Blackwell (88,106 control-steps/s) once the fingertip
+collision hulls are capped at 16 vertices. That is **2.72x** the same config on an H200
+(32,358), GPU and geometry together. The H200 itself was worth only +2.9% over the H100 --
+this workload is latency-bound, not bandwidth-bound, so the hulls are doing most of the work
+(NOTES.md, M3 and M5).
 
-**M5 (nominal training): the pipeline is built and verified end to end, the run has not
-happened.** `scripts/train.py` and `scripts/eval.py` train, checkpoint, upload, resume, load a
-checkpoint back and evaluate -- checked by a round trip on warp-cpu. The milestone criterion
-("success rate above 80% over 1000 eval episodes") needs the 150M-step run on an H100.
+**M5 (nominal training): criterion 1 passes, criterion 2 does not.** The scene and reward
+changes did most of what they were meant to -- parity improves 2.2% -> **0.2%**, warp reports
+**no overflow at all**, the pregrasp parking reward drops +0.978 -> **+0.038**, rotation falls
+~370 -> **155 deg/s** and penetration is clean at -0.309 mm. But measured with the reward's own
+`grasp_state` (which `eval.py` did not report until now), the policy is **not** doing a lateral
+pinch: thumb and index sit on the **same side** of the cap (opposition -0.627 median, opposed
+on 1.6% of steps), so the grasp term pays **0.000** and the policy is optimising rotation
+alone, hovering at 9.8/12.2 mm to stay inside the 20 mm grasp-loss bound on 100% of steps.
+The cause was structural -- `clip(opposition, 0, 1)` has no gradient below zero, so the term
+could not teach the grip it asks for. **Reshaping that one factor to `0.5 * (1 + opposition)`
+fixes it**: opposition goes -0.627 -> **+0.794** (opposed on 75% of steps), the grasp term
+0.000 -> **0.550**, and the gaps collapse 9.8/12.2 mm -> **2.9/0.3 mm**, so the hover is gone
+too. Penetration rises to -0.781 mm and `EPA_HORIZON` returns, both from making real contact.
+Single seed. Details in [`NOTES.md`](NOTES.md), M5.
 
 ## Setup (Mac, CPU)
 
@@ -58,18 +72,20 @@ backend. `impl='jax'` cannot run this scene (no cylinder/mesh collisions).
 
 ```bash
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-unset MUJOCO_GL          # EGL is broken on the Daytona image and breaks `import mujoco`
+unset MUJOCO_GL          # EGL broke `import mujoco` on the M3 image; re-check on a new box
 python3 -c "import jax; print(jax.default_backend())"   # must print: gpu
 
 python3 scripts/squeeze_twist.py     # regenerate the trajectory at the current timestep
 python3 scripts/check_parity.py      # M2 on CUDA
-python3 scripts/benchmark.py --num-envs 8192 --out artifacts/bench.json
+python3 scripts/benchmark.py --num-envs 8192 --out artifacts/bench_h200.json
 ```
 
 **Run one `num_envs` per process.** With `XLA_PYTHON_CLIENT_PREALLOCATE=false` JAX grows its
 pool and never releases it, so sweeping several env counts in one process starves Warp and the
-largest one fails to allocate. There is no `git` on the box -- sync with
-`tar czf - . | ssh HOST 'tar xzf - -C ~/hand-sim'`.
+largest one fails to allocate. This is why the H100's `num_envs = 16384` failure is not a real
+ceiling, and is worth one fresh-process retry on the H200's 141 GiB (NOTES.md, M3).
+
+There is no `git` on the box -- sync with `tar czf - . | ssh HOST 'tar xzf - -C ~/hand-sim'`.
 
 ## The training env
 
@@ -97,14 +113,18 @@ episode. `ppo_config()` asks for `full_reset=True` as well, because otherwise ev
 from the one state cached at the first reset. Both are covered by tests and written up in
 `NOTES.md`, M4.
 
-Two reward weights are worth watching at M5: `reach` at 0.5 pays 8.93 of return for holding the
-pregrasp pose and doing nothing, and `action_rate` at 0.01 is a third of the reward signal for an
-untrained policy. Measured numbers in `NOTES.md`.
+`reach` was replaced by `grasp` at M5, after the first trained policy turned the cap with the
+*side* of its index finger and no thumb at all -- the right contact surface, but a one-sided
+push rather than a grasp. `reach` watched three fingertip sites and could not see it. `grasp`
+asks for what a bottle-cap grasp actually is: the thumb and the index finger both on the cap,
+anywhere along their length, and on opposite sides. See `NOTES.md`, "What the flick policy was
+actually doing". `action_rate` at 0.01 is still a third of the reward signal for an untrained
+policy. Measured numbers in `NOTES.md`.
 
 ## Training
 
 ```bash
-# on the H100
+# on the H200
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 unset MUJOCO_GL
 tmux new -s train

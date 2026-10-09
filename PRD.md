@@ -21,7 +21,7 @@ Do not revisit these without asking.
 | Cap state | "Already cracked open": running friction only, not the sealed breakaway torque. |
 | Simulator | MuJoCo. Training runs on MJX with the Warp backend (`impl='warp'`). |
 | RL | Brax PPO through the MuJoCo Playground env API. Asymmetric actor-critic. |
-| Compute | Scene work on a Mac M1 (CPU). Training on one H100 over SSH. |
+| Compute | Scene work on a Mac M1 (CPU). Training on one rented GPU over SSH: an H100 80GB through M3, an H200 141GB, and an RTX PRO 6000 Blackwell 96GB (sm_120) for the M5 retrain. See NOTES.md, M3 and M5. |
 
 ## Before you trust this file
 
@@ -55,10 +55,11 @@ Environment variables on the GPU box:
 ```bash
 export XLA_PYTHON_CLIENT_PREALLOCATE=false   # JAX otherwise grabs most of the VRAM before Warp gets any
 export MUJOCO_GL=egl                          # fall back to osmesa if EGL is unavailable
+                                              # (broken on the M3 image: leave it unset there, NOTES.md M3)
 export WANDB_API_KEY=...
 ```
 
-Make `impl` a config field everywhere. Use `impl='jax'` for CPU smoke tests of env logic on the Mac and `impl='warp'` on the H100. If the scene does not load under `impl='jax'`, skip local MJX tests and test on the GPU box.
+Make `impl` a config field everywhere. Use `impl='jax'` for CPU smoke tests of env logic on the Mac and `impl='warp'` on the GPU box. If the scene does not load under `impl='jax'`, skip local MJX tests and test on the GPU box.
 
 ## Repo layout
 
@@ -150,8 +151,8 @@ No cap angle in the actor. The cap is rotationally symmetric, so the policy does
 
 | Term | Definition | Weight |
 |---|---|---|
-| rotate | `clip(d_theta / ctrl_dt, -0.5, 2.0)`, `d_theta` from the hinge qpos | 1.0 |
-| reach | `exp(-20 * mean dist)` of thumb, first, middle fingertips to the cap rim | 0.5 |
+| rotate | `clip(d_theta / ctrl_dt, -0.5, 1.0)`, `d_theta` from the hinge qpos | 1.0 |
+| grasp | `exp(-100 * max(thumb gap, index gap)) * clip(opposition, 0, 1)`, surface-to-surface over every collision geom of the thumb and index finger | 0.15 |
 | action rate | `-sum((a_t - a_{t-1})^2)` | 0.01 |
 | torque | `-sum(actuator_force^2)` | 1e-3 |
 | joint velocity | `-sum(qvel_hand^2)` | 1e-4 |
@@ -250,7 +251,7 @@ Done when: numbers are in `NOTES.md` and `num_envs` is chosen.
 
 | Setting | Value |
 |---|---|
-| GPU | 1x H100 |
+| GPU | Whatever the sandbox provides; all three measured so far run unmodified. 1x H100 80GB through M3, 1x H200 141GB, 1x RTX PRO 6000 Blackwell 96GB (sm_120) for the M5 retrain. |
 | Capacity | Spot (can be killed with no warning) |
 | OS | Linux |
 | vCPU / memory / storage | 8 / 32 GiB / 100 GiB |
@@ -259,6 +260,10 @@ Done when: numbers are in `NOTES.md` and `num_envs` is chosen.
 | Delete disk on stop | Unchecked |
 
 Run training inside `tmux`. Assume the machine can disappear at any moment: nothing that matters lives only on its disk.
+
+The boxes have come up with wildly different host specs (52 vCPU / 442 GiB on the H100, 24 / 235 on the H200, 30 / 88 on the Blackwell), none of them matching this row. Re-check per box; the simulation needs almost none of it (6.5 GiB of VRAM at `num_envs = 8192`).
+
+**Assume preemption within the hour.** Four boxes have been killed mid-run so far, twice inside twenty minutes. The disk has survived every restart, and `scripts/train.py --resume` reads the local checkpoint directory before it asks W&B, so a restarted box recovers at the last checkpoint with the spent budget subtracted. Set `WANDB_API_KEY` anyway: it is the only thing that protects against a box whose disk does *not* come back.
 
 ## Stretch, not in scope yet
 

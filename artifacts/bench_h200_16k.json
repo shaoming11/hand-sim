@@ -1,0 +1,18 @@
+[
+  {
+    "num_envs": 16384,
+    "sim_dt": 0.00125,
+    "n_substeps": 40,
+    "naconmax": 720896,
+    "njmax": 150,
+    "seconds": 26.548768367007142,
+    "compile_seconds": 4.073885449994123,
+    "ms_per_control_step": 530.9753673401428,
+    "control_steps_per_s": 30856.421988224567,
+    "sim_steps_per_s": 1234256.8795289826,
+    "realtime_factor": 1542.8210994112283,
+    "overflow_flags": [],
+    "buffer_overflow": [],
+    "finite": true
+  }
+]

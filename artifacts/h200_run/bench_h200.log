@@ -1,0 +1,41 @@
+########## 8192, fresh process ##########
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+jax backend: gpu   devices: [CudaDevice(id=0)]
+
+sim_dt=0.00125 (40 substeps per 0.05 s control step), iterations=30/50, actions=gait, 50 timed steps
+   num_envs   ms/step  ctrl steps/s   sim steps/s  x realtime  compile s  status
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA H200" (140 GiB, sm_90, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+       8192     253.2        32,358     1,294,328       1,618        4.6  ok
+
+highest throughput: num_envs=8192 at sim_dt=0.00125 -> 1,294,328 sim-steps/s (1,618x realtime)
+
+wrote /workspace/hand-sim/artifacts/bench_h200.json
+########## 16384, fresh process ##########
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+linesearch iterations limit reached - please increase ls_iterations beyond 50
+To disable the print warning: m.opt.warn_overflow &= ~mjw.OverflowType.LS_ITERATIONS (or = 0 for all)
+jax backend: gpu   devices: [CudaDevice(id=0)]
+
+sim_dt=0.00125 (40 substeps per 0.05 s control step), iterations=30/50, actions=gait, 50 timed steps
+   num_envs   ms/step  ctrl steps/s   sim steps/s  x realtime  compile s  status
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA H200" (140 GiB, sm_90, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+      16384     531.0        30,856     1,234,257       1,543        4.1  ok
+
+highest throughput: num_envs=16384 at sim_dt=0.00125 -> 1,234,257 sim-steps/s (1,543x realtime)
+
+wrote /workspace/hand-sim/artifacts/bench_h200_16k.json
+########## BENCH_DONE ##########

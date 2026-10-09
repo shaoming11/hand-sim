@@ -1,0 +1,55 @@
+{
+  "episodes": 256,
+  "success_rate": 1.0,
+  "success_stderr": 0.0,
+  "success_threshold_deg": 720.0,
+  "net_rotation_deg": {
+    "mean": 2634.187744140625,
+    "median": 2632.44580078125,
+    "p10": 2610.47265625,
+    "p90": 2662.273193359375
+  },
+  "gross_rotation_deg_mean": 2634.21142578125,
+  "net_over_gross": 0.9999910593032837,
+  "mean_angvel_deg_s": 117.45950317382812,
+  "drop_rate": 0.0,
+  "mean_episode_steps": 400.0,
+  "regrips_per_episode": {
+    "rh_th_tip": 4.0,
+    "rh_ff_tip": 0.0,
+    "rh_mf_tip": 4.0
+  },
+  "episodes_with_no_regrip": 0.0,
+  "simultaneous_contacts": {
+    "median": 0.0,
+    "mean": 0.568193359375,
+    "frac_steps_multi_contact": 0.12732421875,
+    "frac_steps_no_contact": 0.593251953125
+  },
+  "wrist_share_of_travel": 0.08677563071250916,
+  "wrist_joint_count": 2,
+  "hand_joint_count": 24,
+  "action_chatter": 0.05421627312898636,
+  "overflow_flags": [
+    "EPA_HORIZON"
+  ],
+  "gap_thresholds": {
+    "contact_gap_m": 0.01,
+    "release_gap_m": 0.02,
+    "median_gap_m": 0.02758759632706642
+  },
+  "checkpoint": "/workspace/hand-sim/logs/capturn-nominal-s1/checkpoints/from000000000000/000023592960",
+  "step": 23592960,
+  "dr_scale": 0.0,
+  "deterministic": true,
+  "saved": [
+    "/workspace/hand-sim/artifacts/eval_000023592960_ep00.npz",
+    "/workspace/hand-sim/artifacts/eval_000023592960_ep01.npz"
+  ],
+  "saved_net_rotation_deg": [
+    2638.09033203125,
+    2626.344482421875
+  ],
+  "worst_penetration_mm": -0.6091726402972207,
+  "reset_penetration_mm": -3.9333061407304597
+}

@@ -1,0 +1,40 @@
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+compat shims applied: jax.device_put_replicated, brax KERNEL_INITIALIZER[None]  (see capturn/compat.py)
+jax backend: gpu   devices: [CudaDevice(id=0)]
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA RTX PRO 6000 Blackwell Server Edition" (95 GiB, sm_120, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+
+run: capturn-oppfix-s1
+logdir: /workspace/hand-sim/logs/capturn-oppfix-s1
+phase: nominal
+obs: {'privileged_state': (283,), 'state': (210,)}   action: 20
+budget: 40,000,000 steps from step 0 (of 40,000,000 total)
+num_envs: 8192   naconmax: 360,448   njmax: 150
+num_evals: 16  -> a checkpoint every 2,666,667 steps (~1.4 min at the M3 rate)
+
+           0   reward   +0.039   success   0.0%   net     +0.1 deg   net/gross +0.71
+   2,949,120   reward   +1.997   success   0.0%   net   +241.0 deg   net/gross +0.99
+   5,898,240   reward   +3.283   success   0.0%   net   +362.9 deg   net/gross +1.00
+   8,847,360   reward   +4.212   success   0.0%   net   +421.7 deg   net/gross +1.00
+  11,796,480   reward   +4.599   success   0.0%   net   +445.1 deg   net/gross +1.00
+  14,745,600   reward  +16.246   success 100.0%   net  +2346.2 deg   net/gross +1.00
+  17,694,720   reward  +20.081   success 100.0%   net  +3631.4 deg   net/gross +1.00
+  20,643,840   reward  +20.467   success 100.0%   net  +4063.9 deg   net/gross +1.00
+  23,592,960   reward  +21.087   success 100.0%   net  +4130.7 deg   net/gross +1.00
+  26,542,080   reward  +21.685   success 100.0%   net  +4824.4 deg   net/gross +1.00
+  29,491,200   reward  +21.772   success 100.0%   net  +4893.7 deg   net/gross +1.00
+  32,440,320   reward  +21.849   success 100.0%   net  +4739.9 deg   net/gross +1.00
+  35,389,440   reward  +21.729   success 100.0%   net  +4574.9 deg   net/gross +1.00
+  38,338,560   reward  +21.861   success 100.0%   net  +4705.0 deg   net/gross +1.00
+  41,287,680   reward  +21.889   success 100.0%   net  +4493.1 deg   net/gross +1.00
+  44,236,800   reward  +21.904   success 100.0%   net  +4412.9 deg   net/gross +1.00
+
+done in 1836.0 s (21,787 steps/s overall)
+final checkpoint: /workspace/hand-sim/logs/capturn-oppfix-s1/checkpoints/from000000000000/000044236800  (global step 44,236,800)
+next: python3 scripts/eval.py /workspace/hand-sim/logs/capturn-oppfix-s1/checkpoints/from000000000000/000044236800 --save 4

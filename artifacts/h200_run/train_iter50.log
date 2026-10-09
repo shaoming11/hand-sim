@@ -1,0 +1,34 @@
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+compat shims applied: jax.device_put_replicated, brax KERNEL_INITIALIZER[None]  (see capturn/compat.py)
+jax backend: gpu   devices: [CudaDevice(id=0)]
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA H200" (140 GiB, sm_90, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+
+run: capturn-iter50-s1
+logdir: /workspace/hand-sim/logs/capturn-iter50-s1
+phase: nominal
+obs: {'privileged_state': (283,), 'state': (210,)}   action: 20
+budget: 20,000,000 steps from step 0 (of 20,000,000 total)
+num_envs: 8192   naconmax: 360,448   njmax: 150
+num_evals: 10  -> a checkpoint every 2,222,222 steps (~1.2 min at the M3 rate)
+
+           0   reward   +0.978   success   0.0%   net    -96.9 deg   net/gross -1.00
+   2,293,760   reward   +9.457   success   2.1%   net   +413.5 deg   net/gross +0.86
+   4,587,520   reward  +25.119   success 100.0%   net  +3584.6 deg   net/gross +1.00
+   6,881,280   reward  +37.875   success 100.0%   net  +6487.0 deg   net/gross +1.00
+   9,175,040   reward  +44.215   success 100.0%   net  +6957.7 deg   net/gross +1.00
+  11,468,800   reward  +45.777   success 100.0%   net  +8309.8 deg   net/gross +1.00
+  13,762,560   reward  +46.283   success  99.8%   net  +8485.7 deg   net/gross +1.00
+  16,056,320   reward  +46.292   success  99.6%   net  +8122.0 deg   net/gross +1.00
+  18,350,080   reward  +46.869   success 100.0%   net  +7296.1 deg   net/gross +1.00
+  20,643,840   reward  +47.046   success 100.0%   net  +7454.0 deg   net/gross +1.00
+
+done in 1582.5 s (12,638 steps/s overall)
+final checkpoint: /workspace/hand-sim/logs/capturn-iter50-s1/checkpoints/from000000000000/000020643840  (global step 20,643,840)
+next: python3 scripts/eval.py /workspace/hand-sim/logs/capturn-iter50-s1/checkpoints/from000000000000/000020643840 --save 4

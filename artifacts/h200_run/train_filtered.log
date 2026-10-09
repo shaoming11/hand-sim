@@ -1,0 +1,23 @@
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+compat shims applied: jax.device_put_replicated, brax KERNEL_INITIALIZER[None]  (see capturn/compat.py)
+jax backend: gpu   devices: [CudaDevice(id=0)]
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA H200" (140 GiB, sm_90, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+
+run: capturn-nominal-s1
+logdir: /workspace/hand-sim/logs/capturn-nominal-s1
+phase: nominal
+obs: {'privileged_state': (283,), 'state': (210,)}   action: 20
+budget: 150,000,000 steps from step 0 (of 150,000,000 total)
+num_envs: 8192   naconmax: 360,448   njmax: 150
+num_evals: 24  -> a checkpoint every 6,521,739 steps (~3.5 min at the M3 rate)
+
+           0   reward   +0.978   success   0.0%   net    -96.9 deg   net/gross -1.00
+   6,553,600   reward  +35.823   success 100.0%   net  +5653.7 deg   net/gross +1.00
+  13,107,200   reward  +45.817   success 100.0%   net  +7899.7 deg   net/gross +1.00

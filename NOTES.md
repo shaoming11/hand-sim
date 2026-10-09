@@ -367,7 +367,8 @@ three times. Final numbers, 192 control steps of the M1 gait:
 
 `warp-lang` ships a CPU build, so `impl='warp'` works on an M1 without CUDA -- slowly (about
 75 s for a 9.6 s rollout, most of it one-off kernel compilation), but it is the real backend.
-Everything in this section was measured locally; re-run on the H100 to confirm.
+Everything in this section was measured locally; re-run on the GPU box to confirm (done at M3 on
+the H100, and worth re-confirming on the H200).
 
 **`impl='jax'` cannot run this scene at all**: `NotImplementedError: (mjGEOM_CYLINDER,
 mjGEOM_MESH) collisions not implemented`. Every fingertip is a mesh. So the PRD's suggestion to
@@ -493,6 +494,11 @@ RAM, CUDA JAX 0.11.2. Raw data in `artifacts/bench_h100.json`. Method: `scripts/
 replaying the M1 gait, 50 timed control steps after 5 warmup, compilation excluded,
 `naconmax = 44 * num_envs`, `njmax = 150`.
 
+**The box is an H200 now.** Everything in this section was measured on the H100 and is kept as
+the record of that machine. Nothing in the code is tied to it — no arch flags, no memory
+tuning, `impl='warp'` either way — so it all runs unchanged. What the H200 changes, and which of
+these numbers need re-measuring, is in "Moving to the H200" at the end of this section.
+
 ### Throughput vs `num_envs` (at the chosen `sim_dt = 0.00125`, 40 substeps)
 
 | num_envs | ms / control step | control steps/s | sim steps/s | x realtime | gain on doubling |
@@ -577,6 +583,48 @@ second independent data point.
   any") showing up as a mid-sweep failure rather than at startup.
 * **No `git` and no `time` on the image.** Sync with `tar | ssh`, and note `scp` to `~/path`
   fails — use an absolute `/root/...` destination or pipe through `cat`.
+
+### Moving to the H200
+
+The box is an H200 as of 2026-10-07. Nothing in the repo changes for it: same GH100-class
+compute, same `sm_90` target, same CUDA JAX wheels, and no part of the code is gated on the
+device (`impl='warp'`, no arch flags, no memory-fraction tuning). The two differences that
+matter are **141 GiB HBM3e instead of 80 GiB** and **~4.8 TB/s of memory bandwidth instead of
+~3.35 TB/s**.
+
+What that means for the numbers above:
+
+* **Measured 2026-10-07: +2.9%, and that is all.** 8192 envs go from 31,449 to **32,358
+  control-steps/s** (1,294,328 sim-steps/s, 1,618x realtime), in
+  `artifacts/bench_h200.json`. The ~1.4x bandwidth advantage does not show up at all: this
+  workload is latency- and occupancy-bound, not bandwidth-bound. Treat the H200 as an H100
+  with more VRAM. The GPU sits at 100% utilisation drawing only 240 W of a 700 W budget, which
+  is the same story from the power side.
+* **M2 parity re-confirmed on the H200: 1.7%** (CPU +59.37 deg vs warp +60.37 deg), no
+  overflow flags, `nacon` 11, `ncollision` 22, `nefc` 71, solver using 9 of 30 iterations,
+  penetration -0.113 mm against CPU's -0.574 mm. Buffer sizing transfers exactly, so
+  `naconmax = 44 * num_envs` and `njmax = 150` still hold. Log in
+  `artifacts/h200_run/parity_h200.log`.
+* **The extra VRAM buys nothing directly.** The simulation used 6.5 GiB of 81.6 GiB at
+  `num_envs = 8192`; it was never the binding constraint and is less of one now.
+* **The H100's `num_envs = 16384` failure was an artefact, and 16384 is worse anyway.**
+  Retried in a *fresh* process on the H200 it allocates fine and runs clean (no overflow, no
+  buffer overflow, finite) — so the M3 ceiling was the documented single-process starvation
+  mode, not a hard wall. But it is **30,856 control-steps/s against 8192's 32,358, i.e. 4.6%
+  slower**, and it printed an `ls_iterations` warning that 8192 did not. Raw data in
+  `artifacts/bench_h200_16k.json`.
+* **So `num_envs = 8192` stands, now on merit rather than on a failed allocation.** It is the
+  faster of the two measured, and it is what makes Playground's tuned `LeapCubeRotateZAxis`
+  block transfer unchanged. The config comment that said "8192 is the largest that fits" was
+  wrong about the reason and has been corrected.
+* **Re-confirm parity before the training run, not just throughput.** Different device,
+  different driver, possibly a different image: `check_parity.py` is cheap and M2's 2.6% is the
+  number that says the physics is still the physics.
+* **The checkpoint cadence self-corrects.** `num_evals = 24` was derived from the H100 rate to
+  give a checkpoint every ~3.5 min. If the H200 is faster the cadence only tightens, which is
+  harmless on a preemptible box, and `train.py --checkpoint-every MIN` re-derives it.
+* **`MUJOCO_GL` and the missing `git`/`time` notes above are properties of the Daytona image,
+  not of the GPU.** Re-check them on the new box rather than assuming either way.
 
 
 ---
@@ -717,6 +765,8 @@ steps of either rollout — the 10 cm drop condition does not fire spuriously.
 | reward = sum of terms | sum × `ctrl_dt` | Playground's convention, which the borrowed PPO hyperparameters were tuned against. Uniform, so the relative weighting is unchanged; the one consequence is that the one-time success bonus is worth 0.5 of return, not 10 |
 | critic obs = "actor obs plus ..." | the full 210-frame history plus 73 | read literally. Leap passes only the current frame; duplicating 210 inputs into a 512-wide critic costs nothing and makes the layout checkable |
 | reach to the cap "rim" | to the cap *surface* | the same quantity M0 and M1 reported as "gap to cap surface"; rounds off at the rim rather than jumping |
+| `reach`, `exp(-20 * mean dist)` of three fingertips | `grasp`: thumb and index both on the cap, anywhere along their length, and opposed | M5. The PRD's term measures three fingertip *sites*, and a bottle cap is not opened with a fingertip tripod -- it is a lateral pinch, thumb pad against the side of the index finger. The first trained policy used the right surfaces (`rh_ffmiddle`, `rh_ffproximal`) and the term could not see them, while averaging let one tip on the cap pay for two curled away |
+| `rotate` clipped at 2.0 rad/s | 1.0 rad/s | success needs 0.63 rad/s, so 2.0 paid for spinning three times faster than the task asks; the flick policy saturated it every step at 4.6 |
 | critic sees "cap angle (unwrapped)" | cumulative rotation | same quantity minus the episode's random start offset, so it starts at 0 instead of somewhere in [0, 2*pi) |
 | success = "one-time bonus" | upward crossing of 4*pi | a latch would be exactly one-time but it evolves, so it would go stale *high* under `full_reset=False` and then never fire — silent, and worse than a bonus that can fire twice if the cap oscillates across the threshold |
 | "fingertip positions relative to the cap" | all five | the sensors already exist; the ring and little fingers do not gait but the critic may as well see them |
@@ -739,18 +789,453 @@ later instance; `CapTurn` defaults to `None` and builds a fresh config.
 the exploit checks), `capturn/compat.py` (two dependency shims, below) and
 `tests/test_train.py` (27 checks in the default suite, 1 behind `HAND_SIM_SLOW=1`).
 
-**The milestone criteria are not met yet, and cannot be from here.** "Success rate above 80%
-over 1000 eval episodes" needs the 150M-step run on the H100; what is built and verified is the
-pipeline that produces that number, end to end on warp-cpu: train -> checkpoint -> load the
-checkpoint back -> roll out 1024 episodes -> write `.npz` -> render on the Mac. The
-`HAND_SIM_SLOW` test does exactly that round trip (4 min on the Mac at `--smoke` sizes) and is
-what every finding below came out of.
+**The milestone is not met. The run has now happened on GPU and it fails criterion 2.** The
+first 13.1M steps on the H200 reach 100% success and a `PASS` on criterion 1 within a single
+eval — and that is the problem, not the result. See "First GPU run: the flick exploit" directly
+below. What was built and verified before that run is the pipeline that produces the number,
+end to end on warp-cpu: train -> checkpoint -> load the checkpoint back -> roll out 1024
+episodes -> write `.npz` -> render on the Mac. The `HAND_SIM_SLOW` test does exactly that round
+trip (4 min on the Mac at `--smoke` sizes) and is what every finding below came out of.
+
+### First GPU runs on the H200 — criterion 1 is trivial, criterion 2 is the open question
+
+Two runs, same seed, single seed each, 2026-10-07. `capturn-nominal-s1` at the documented
+`iterations=30 ls_iterations=50`, stopped by hand at 13.1M steps; `capturn-iter50-s1` at
+**50/80**, a full 20M-step shakeout. Throughput was never the issue: **30,482 env-steps/s**,
+94% of the pure-simulation benchmark, so 150M would land in ~82 minutes.
+
+**Criterion 1 is met almost immediately and is not informative.** Both runs clear "80% success
+over 1000 eval episodes" within two evals and then saturate at 100%, turning the cap ~20 times
+in a 20 s episode against a 2-turn bar:
+
+| | 30/50 @ 13.1M | 50/80 @ 20.6M |
+|---|---|---|
+| success rate | 100.0% | 100.0% |
+| net rotation | +7,899 deg | +7,455 deg |
+| mean angular velocity | +377 deg/s | +355 deg/s |
+
+With no thread model and a cap that is a single low-friction hinge, nothing coupling rotation
+to anything else, a policy that can turn the cap at all will turn it as fast as the hinge
+allows. Criterion 1 cannot distinguish a gait from a spin; criterion 2 is the whole test.
+
+#### The penetration exploit reported here first was a measurement artifact — corrected
+
+The first writeup of this run claimed the policy drove a fingertip **4.5 mm through the cap**.
+That was wrong, and the tell was visible in the number itself: `worst_penetration_mm` came back
+as `-4.530999627323126` for two completely different policies, bit for bit. A policy-dependent
+quantity cannot do that.
+
+`eval.py`'s `penetration_mm` took the deepest contact over *every* replayed frame, and frame 0
+is the reset pose. `reset_noise.hand_qpos` perturbs 24 joints by up to 0.05 rad with no
+collision check, so some resets start with a fingertip several mm inside the cap; the reset
+states are seeded, so every policy inherits the same worst case. **The -4.531 mm was the
+starting pose, not anything learned.** `penetration_mm` now returns `(policy_mm, reset_mm)` and
+`eval.py` reports both lines.
+
+Measured properly, over the frames the policy is responsible for:
+
+| | 30/50 @ 13.1M | 50/80 @ 20.6M | M1 open-loop |
+|---|---|---|---|
+| deepest penetration | **-0.439 mm** | **-0.272 mm** | -0.566 mm CPU, -0.104 mm warp |
+
+Both policies are *better* than the CPU open-loop reference. **There is no penetration
+exploit.** The contact geometry diagnostic agrees: the deepest cap contact over a whole episode
+is -0.289 mm (30/50) and -0.252 mm (50/80), on `cap <-> geom27`.
+
+#### What 50/80 actually changed: the regrip pattern
+
+The real criterion-2 signal is which fingers do the work, and there the two runs differ sharply:
+
+| | 30/50 @ 13.1M | 50/80 @ 20.6M |
+|---|---|---|
+| regrips, thumb | **0.00** | 11.00 |
+| regrips, index | **0.00** | 11.00 |
+| regrips, middle | 12.00 | 10.00 |
+| median fingertip gap | 27.1 mm | **12.3 mm** |
+| wrist share of travel | 17.8% | **10.0%** |
+| action chatter | 0.044 | 0.067 |
+
+At 30/50 the hand hovers 27 mm off the cap — well outside the 10 mm contact threshold — and a
+single finger does everything while the other two never make contact. Rendering the 6.55M
+checkpoint shows exactly that: thumb and middle curled up and away for the entire cycle, one
+finger working the rim. At 50/80 all three gaiting fingertips regrip 10-11 times an episode,
+the median gap falls to just above the contact threshold, and the wrist's share of the motion
+halves. The render (`artifacts/h200_run/iter50_ep00.mp4`) shows several fingers down on the cap
+with contacts on multiple tips.
+
+That is the shape of a gait rather than a one-finger spin, and it is a real change. **It is not
+proof the milestone is met**, and this comparison is weaker than it looks:
+
+* **n = 1 per configuration, and the budgets differ** (13.1M vs 20.6M steps). Some of the gap
+  may be training time, not the solver cap. Multi-seed, equal-budget runs are needed before
+  anything here is a result.
+* **Action chatter went up**, 0.044 -> 0.067, which is the one metric that moved the wrong way.
+* **~20 turns per episode at 355 deg/s** is still fast enough to be worth watching in video
+  rather than trusting the summary.
+
+#### Raising the cap did not stop the overflows
+
+The change was made to fix non-converged contact solves, and it did not. Over the 20M-step run
+at 50/80 the log carries **3,106 `ITERATIONS` and 4,228 `EPA_HORIZON` overflows** — the solver
+wants more than 50 iterations in exploration states, not just more than 30. M2 parity still
+passes at 50/80 (2.2%, solver using 9 of 50 on the scripted gait), so the change is harmless;
+it just does not reach the problem.
+
+Note which knobs do not exist on this backend, because it bounds what is fixable in config:
+
+* **`EPA_HORIZON` is not configurable** — a compile-time 24-entry convex collision horizon
+  inside warp, confirmed by inspection of `mujoco_warp`'s `Option` struct.
+* **`ccd_iterations`/`ccd_tolerance` do nothing on warp.** `scene.xml` sets 50 / 1e-8 and the
+  comment there records how strongly they govern tip sink-in on CPU (7.4 mm at 10, 1.3 mm at
+  50) — but the M2 finding below is that warp's `opt` carries neither field. The accuracy
+  controls that would govern penetration are CPU-only.
+
+Given that penetration measures better than the M1 reference on both policies, the overflows
+are not currently producing a visible exploit. They remain a standing risk rather than a
+demonstrated one.
+
+#### What does reach the overflows: capping the fingertip collision hulls
+
+The open item above -- "simplifying the fingertip meshes to stay inside the EPA horizon" -- is
+now done, and it is the only change so far that attacks `EPA_HORIZON` at its cause rather than
+around it.
+
+Every phalanx on this hand is already a capsule or a box. The **two distal meshes are the only
+hand geoms that still collide as meshes**, and nobody had measured their convex hulls:
+
+| mesh | render verts | convex hull |
+|---|---|---|
+| `f_distal_pst` | 2691 | **1065** |
+| `th_distal_pst` | 2380 | **1164** |
+| `cap_prism` | 32 | 32 |
+
+Against a compile-time 24-entry horizon. That is 48x over on the thumb, on the one pair that
+forms every cap contact. `maxhullvert="16"` on the two mesh assets caps the *collision* hull
+only -- the visual geoms share the mesh but are `contype=0`, and `mesh_vertnum` is unchanged at
+2691/2380, so the rendered tip is untouched.
+
+Chosen by sweeping the M1 gait replay (`artifacts/squeeze_twist.npz`, CPU, 9.6 s):
+
+| maxhullvert | hull verts | cap rotation | deepest penetration |
+|---|---|---|---|
+| none | 1164 | +59.43 deg | -0.117 mm |
+| 24 | 24 | +57.35 | -0.117 |
+| **16 (chosen)** | **16** | **+59.89** | **-0.109** |
+| 12 | 12 | +75.75 | -0.165 |
+| 8 | 8 | +77.03 | -0.173 |
+
+16 reproduces the reference to 0.8% with slightly less penetration. Below 16 the pad is whittled
+into a point that bites and rotation jumps 27% -- that is distortion, not improvement.
+
+**M2 parity got better, which was not the goal.** CPU vs warp on the scripted gait went from
+2.2% at 50/80 to **0.2%** (CPU +59.89, warp +60.00), with the solver using 7 of 50 iterations
+and no overflow flags. So the oversized hulls were also a source of CPU/GPU divergence. Buffer
+sizing is unchanged: `naconmax >= 44` per world, `njmax >= 106`.
+
+**Untested against the exploit.** The scripted gait never set `EPA_HORIZON` at 30/50 either, so
+a clean parity run proves nothing about exploration states -- the 4,228 overflows at 50/80 are
+the number to watch. `tests/test_scene.py::test_cap_contact_hulls_fit_the_epa_horizon` now fails
+if any cap-reachable collision mesh goes back over 24, with `forearm_collision` (98) and
+`cap_prism` (32) explicitly allowlisted and the reason recorded.
+
+And note what this does *not* claim: penetration was already fine (see above), so this is a
+fidelity fix, not the cause of the one-finger spin. The one-finger run in
+`artifacts/h200_run/exploit_ep00.mp4` is the superseded 30/50 config.
+
+#### What the flick policy was actually doing: driving the cap with its knuckles
+
+Replaying both saved episodes through CPU `mj_forward` and asking which *bodies* form a cap
+contact, rather than how far the fingertip sites are:
+
+| body | geom | ep00 | ep01 |
+|---|---|---|---|
+| `rh_ffmiddle` | capsule | 22.9% of frames | **31.4%** |
+| `rh_ffproximal` | capsule | **24.4%** | 30.7% |
+| `rh_mfproximal` | capsule | 0.5% | 1.0% |
+| `rh_ffdistal` | mesh | **0.5%** | **0.5%** |
+
+**The cap is being turned by the index finger's proximal and middle segments -- the base of the
+finger, not the tip.** The fingertip touches in 1 frame in 200.
+
+That is why every diagnostic missed it. `tip_gaps`, and therefore `reach`, the drop termination
+and eval's regrip counter, all measure the three fingertip **sites**. The tips really were
+30-40 mm away; the metric was right and irrelevant. The task says "turn the cap with your
+fingertips", the physics says "any geom with `contype=1` may turn the cap", and the policy found
+the gap between the two. Warp's standing multicontact warning names the exact pair it used:
+`('CAPSULE','MESH')`, at most one contact point.
+
+This also retires the two hypotheses above it. Measured with the scripted gait at `grip=0.25`:
+
+| fingers | fl=0.05 | 0.08 | 0.12 | 0.16 |
+|---|---|---|---|---|
+| 1 (index) | +3.3 deg | +2.9 | +2.9 | +2.9 |
+| 2 (thumb+index) | +14.5 | +3.5 | +3.5 | +3.5 |
+| 3 (th+ff+mf) | **+59.9** | +4.5 | +4.5 | +4.5 |
+
+* **Raising thread friction is not the fix.** One finger already cannot turn the cap with an
+  honest gait -- 3.3 deg in 9.6 s, which is the same floor it shows when the cap is immovable.
+  And above 0.05 N*m *nothing* works, including the three-finger gait. There is no value that
+  stops a one-finger solution without stopping every solution.
+* **Nor is an unwelded bottle.** The weld is a fair model of the other hand bracing the bottle,
+  and a knuckle-driven turn applies no more net lateral force than a fingertip-driven one.
+* **Cap damping is not a clean discriminator either.** Raising it from 0.002 to 0.02 halves the
+  speed an impulse imparts (9969 -> 4642 deg/s) but costs the legitimate gait 45% (59.9 -> 32.8
+  deg). It taxes both behaviours about equally.
+
+**This is not an exploit of the contact model -- it is the right surface and the wrong grasp.**
+A person opens a bottle cap with a lateral pinch: the thumb pad opposed by the *side* of the
+index finger, not a tripod of fingertips. `rh_ffmiddle` and `rh_ffproximal` on the cap is
+exactly what that looks like. What is missing is the thumb. Measuring the two surfaces properly
+-- closest approach over every collision geom on each finger, and the angle between where they
+touch:
+
+| | thumb gap | index gap | opposition |
+|---|---|---|---|
+| M1 scripted gait | 2.2 mm | 6.4 mm | **+0.78** |
+| flick policy | **20.0 mm** | 0.3 mm | **-0.34** |
+
+(+1 is fully opposed, -1 is both hands on the same side.) The index finger is gripping *better*
+than the reference gait. The thumb is absent, the contacts sit 66 deg apart instead of 139, and
+the result is a one-sided push rather than a couple.
+
+So the fix is in what the reward measures, not in restricting what may touch the cap -- scoping
+the cap's collisions to the distal geoms, which was the obvious move, would have forbidden the
+human grasp.
+
+* **`reach` is replaced by `grasp`** (`capturn/env.py`). Not three fingertip sites but two
+  *surfaces*: the closest approach of any collision geom on the thumb and on the index finger,
+  sampled along each capsule's axis. The term is
+  `exp(-100 * max(thumb_gap, index_gap)) * clip(opposition, 0, 1)` -- both on the cap, and
+  opposed, with the product going to zero the moment they crowd the same side. On the
+  recordings it scores the M1 gait **0.41** and the flick **0.00**. Weight 0.5 -> 0.15; holding
+  the pregrasp pose for a whole episode now returns ~1.0 against ~14 for succeeding, where it
+  used to be 8.93 against ~21.
+* **`rotate_clip` 2.0 -> 1.0 rad/s.** Success needs 0.63 rad/s; the flick saturated the old
+  clip every step at 4.6.
+* **A second termination, on a grace period.** Both surfaces must be within
+  `contact_distance = 20 mm`, but losing that for an instant is not a failure -- a gait *has*
+  to let go to regrip, and an instantaneous rule would terminate the M1 gait on 15% of its own
+  steps. What separates the two is duration: the scripted gait's longest release is **3**
+  control steps, the flick hovers for **18** at a time, eleven times an episode.
+  `grasp_grace_steps = 8` sits between them. `drop_distance` (10 cm) never fired at all -- the
+  hand was always well inside it.
+* **Three new metrics**, `thumb_gap_per_step` / `index_gap_per_step` / `opposition_per_step`,
+  because the reward term is a product and a zero is otherwise unattributable.
+
+Verified end to end on warp-cpu: at the settled pregrasp pose thumb 4.6 mm, index 8.3 mm,
+opposition +0.80, no termination; opening the hand terminates on step 8, as the grace specifies.
+
+Two caveats. All of this is scored against the *existing* exploit trajectory, so it closes this
+hole and proves nothing about the next one -- only a retrain settles it. And `grasp` is now a
+product of two factors, which is a harsher optimisation surface than the old smooth exponential;
+if learning stalls early, suspect the opposition factor pinning the term at zero before the
+policy ever finds a two-sided grip.
+
+Rejected: scoping the cap's collisions to the distal geoms with `contype`/`conaffinity`, so no
+knuckle *can* touch it. It would have made the physics agree with what the reward measured, but
+it had the task backwards -- the side of the index finger is the correct contact surface for
+this grasp, and forbidding it would rule out the behaviour we are trying to produce.
+
+#### Separate, real, and unfixed: the reset pose can start inside the cap
+
+`reset_noise.hand_qpos = 0.05` rad is applied to all 24 joints with no collision check, and at
+least one seeded reset starts a fingertip **4.5 mm inside the cap**. The episode then begins by
+resolving that interpenetration, which is a physics transient the policy sees as free reward.
+Found only because it was corrupting the penetration metric.
+
+Now measured, and it is much worse than "at least one". Sampling the actual reset distribution
+(pregrasp keyframe + uniform hand jitter + uniform cap angle, 1500 draws per row, CPU
+`mj_forward`, deepest contact over the whole model):
+
+| `hand_qpos` | starts >1 mm deep | starts touching | deepest |
+|---|---|---|---|
+| **0.05 (today)** | **46.5%** | 60.0% | **-10.12 mm** |
+| 0.03 | 14.9% | 31.1% | -4.83 |
+| 0.02 | 1.2% | 8.7% | -2.14 |
+| 0.01 | 0.0% | 0.0% | 0.00 |
+
+**Nearly half of every training episode begins inside the cap.** The pregrasp pose holds the
+tips about 2 mm off the wall (`MIN_STANDOFF`, M1), and 0.05 rad across 24 joints moves a
+fingertip several mm, so the jitter is simply larger than the standoff it has to respect.
+
+0.01 rad is clean but is barely randomisation; 0.02 at 1.2% is the honest trade if the jitter
+has to stay meaningful. The PRD asks for "about +-0.05 rad" (`PRD.md:163`), so this is a
+deliberate deviation and needs writing up as one -- or fixing properly with a rejection sample
+in `reset`, which costs a branch in a jitted function. **Not changed yet**: it moves the
+training distribution, and the 30/50 vs 50/80 comparison is already n=1 per config.
+
+### The retrain on simplified hulls, on an RTX PRO 6000 Blackwell
+
+2026-10-08, after the scene and reward changes (`maxhullvert="16"` on the two distal meshes, the
+opposition-gated `grasp` term replacing `reach`, `rotate_clip`, and grasp-loss termination).
+Run `capturn-nominal-s1` on a **1x RTX PRO 6000 Blackwell Server Edition, 96 GiB, sm_120**.
+
+**The stack runs on Blackwell unmodified.** jax 0.11.2 (cuda12) and warp-lang 1.17.0 both
+compile for sm_120 with no version changes and no flags; warp reports CUDA Toolkit 12.9 under
+driver 13.2. Nothing in the repo needed touching for the architecture change, same as the H200.
+
+#### The hull simplification is a large win on both accuracy and speed
+
+| | H200, full hulls | RTX PRO 6000, `maxhullvert=16` |
+|---|---|---|
+| CPU vs MJX-warp parity | 2.2% | **0.2%** |
+| `nacon` / `nefc` max | 11 / 71 | **6 / 50** |
+| warp penetration (scripted gait) | -0.113 mm | -0.107 mm (CPU -0.613) |
+| solver iterations used | 9 of 50 | 7 of 50 |
+| throughput at 8192 envs | 32,358 ctrl-steps/s | **88,106 (2.72x)** |
+
+88,106 control-steps/s is 3,524,230 sim-steps/s, **4,405x realtime**, which puts 150M steps at
+about 28 minutes of simulation. The 2.72x is GPU *and* geometry together and this run cannot
+separate them — collision was the bottleneck, so most of it is very likely the hulls, but
+proving that needs the old geometry benchmarked on this box.
+
+One number moved the wrong way: **M2 criterion 2, halving `sim_dt`, went from 0.6% to 3.3%**
+(worst gap along the trajectory 6.7%). Still a PASS at the 10% bar, but the simplified hull is
+noticeably more timestep-sensitive than the full one. Worth a look if `sim_dt` is ever revisited.
+
+#### The reward changes did what they were meant to
+
+The old reward found 100% success at 4.6M steps by stumbling into a spin. This one has to learn:
+
+| step | reward | success | net rotation |
+|---|---|---|---|
+| 0 | +0.038 | 0.0% | +0.1 deg |
+| 6,553,600 | +2.358 | 0.0% | +368.5 deg |
+| 13,107,200 | +4.143 | 0.0% | +466.7 deg |
+| 19,660,800 | +5.321 | 0.0% | +527.2 deg |
+| 26,214,400 | +19.432 | **100.0%** | +2,553.7 deg |
+| 32,768,000 | +20.584 | 100.0% | +3,462.4 deg |
+| ... | ~20.9 | 100.0% | ~3,100-3,400 deg |
+| 65,536,000 | **+2.838** | **0.0%** | +407.3 deg |
+| 72,089,600 | +19.312 | 100.0% | +2,476.2 deg |
+| 91,750,400 | +21.113 | 100.0% | +3,328.4 deg |
+
+Three things to read off it. The step-0 reward is **+0.038 against the old +0.978**, so parking
+at the pregrasp pose no longer pays. Success arrives at **26.2M rather than 4.6M**, through a
+long stretch of sub-threshold rotation — the policy climbs rather than jumps. And the converged
+rotation is **~166 deg/s against the old 355-377 deg/s**: `rotate_clip` is visibly holding speed
+down, since nothing is paid for spinning past what the task asks.
+
+**A collapse at 65.5M**: reward 20.98 -> 2.84, success 100% -> 0%, net rotation back to +407 deg,
+fully recovered by 72.1M. One bad PPO update, self-healed, no intervention. Worth knowing it
+happens on this config before reading too much into any single eval.
+
+#### EPA_HORIZON is reduced, not solved
+
+The hulls fix it for the scripted gait and the untrained policy and then it comes back as the
+policy learns to actually hold the cap:
+
+| when | EPA_HORIZON overflows |
+|---|---|
+| `check_parity.py`, scripted gait | **0** |
+| training, first 45 s (untrained) | **0** |
+| training, by 13.1M steps | 12,912 |
+| training, by ~72M steps | **73,666** |
+
+So 1065/1164 -> 16 vertices moved the horizon problem out of the low-contact regime but not out
+of a real grasp. `ITERATIONS` follows the same shape (2,619 by ~72M) and is far below the
+30/50-era rate but not gone. Neither has a model-level knob on warp, as recorded above.
+
+#### Criterion 2, finally measured: the grasp term is inert and the policy hovers
+
+A second Blackwell box (the first was preempted at 91.75M with its disk lost) ran a 40M-step
+budget to 44.2M and `eval.py` ran on it. Reward plateaued at +20.1, success 100% from 14.7M.
+
+**`eval.py` could not answer criterion 2 as written.** Every gaiting number it reported was
+built from the three fingertip sites, and the grasp this task now asks for is a *lateral
+pinch* -- the thumb against the side of the index finger. Fingertip metrics read "off the cap"
+for a perfectly good pinch, and indeed reported `tips on the cap at once: 0.00 median` with
+53% of steps showing no tip contact at all. `grasp_state`'s docstring already said "Public
+because `scripts/eval.py` reports all three", but the wiring was never there. It is now:
+`thumb_gap`, `index_gap` and `opposition` are collected per step in the rollout and summarised
+by `grasp_summary`.
+
+With the right instrument, over 256 episodes at 44.2M:
+
+| | value | reading |
+|---|---|---|
+| thumb gap | 9.81 mm median | near the cap, not on it |
+| index gap | 12.22 mm median | near the cap, not on it |
+| **opposition** | **-0.627 median, opposed on 1.6% of steps** | thumb and index are on the **same side** |
+| **grasp reward term** | **0.000 median** | the term pays nothing |
+| both within `contact_distance` | **100.00% of steps** | never terminates |
+| deepest penetration | -0.309 mm | clean, better than M1's -0.566 CPU |
+| warp overflow | **none** | the hull fix holds |
+
+**The grasp term is contributing nothing, and cannot.** The reward is
+`exp(-100 * max(thumb_gap, index_gap)) * clip(opposition, 0, 1)`, and `clip` has **zero
+gradient below zero**. Opposition is negative on 98.4% of steps, so for almost every step the
+policy takes, the grasp term is not merely small -- it is flat, with no derivative pointing
+anywhere. There is no path by which the policy can learn its way into an opposed grip from
+where it starts. It therefore optimises `rotate` alone.
+
+**And the termination is satisfiable by hovering.** `contact_distance = 0.020` ends the episode
+after 8 consecutive steps with both surfaces beyond 20 mm. The policy sits at 9.8 and 12.2 mm:
+inside the bound on **100%** of steps, so it never terminates, while never closing a grip. The
+threshold was read off the recordings as something the flick policy failed (20-22 mm) -- this
+policy simply parks just inside it.
+
+This is still a real improvement on the flick: rotation is down to 155 deg/s from ~370, wrist
+share to 6.6% from 17.8%, penetration is clean, and warp reports no overflow at all. But
+**criterion 2 is not met** -- it is not a lateral pinch, it is a one-sided hover that pushes the
+cap round.
+
+Two concrete things follow, neither of them tried yet:
+
+* **Give opposition a gradient.** `0.5 * (1 + opposition)` is positive everywhere and smooth,
+  so it shapes toward opposition instead of switching off outside it. Any monotone map of
+  `opposition` onto `(0, 1]` would do; the multiplicative hard gate is what kills it.
+* **Make `contact_distance` mean contact.** At 20 mm the bound is satisfied by hovering. The
+  gaps are surface-to-surface, so a threshold at or below zero asks for touching; the gait
+  recordings put the M1 thumb at 2.2 mm and index at 6.4 mm, which is the band worth aiming at.
+
+#### Reshaping the opposition gate: the grasp term switches on
+
+One change, nothing else: `jp.clip(opposition, 0.0, 1.0)` -> `0.5 * (1.0 + opposition)` in the
+`grasp` reward. Same seed, same 40M budget, same everything else, so the comparison is clean.
+
+| | `clip` gate | reshaped |
+|---|---|---|
+| opposition, median | **-0.627** | **+0.794** |
+| steps opposed | 1.6% | **75.2%** |
+| grasp reward term, median | **0.000** | **0.550** |
+| thumb gap, median | 9.81 mm | **2.92 mm** |
+| index gap, median | 12.22 mm | **0.30 mm** |
+| tips on the cap at once, median | 0.00 | **1.00** |
+| steps with no tip contact | 53.3% | 31.2% |
+| regrips th / ff / mf | 5 / 0 / 5 | 0 / 7 / 7 |
+| net rotation | +3,398 deg | +4,493 deg |
+| mean angular velocity | 155 deg/s | 199 deg/s |
+| deepest penetration | -0.309 mm | **-0.781 mm** |
+| warp overflow | none | EPA_HORIZON |
+
+**The hover fixed itself, which is the part worth understanding.** Only the opposition factor
+was touched, yet the gaps collapsed from 9.8/12.2 mm to 2.9/0.3 mm. That follows directly: the
+term is a *product*, so while `clip` pinned one factor at zero the `exp(-100 * gap)` factor had
+no influence on the total either. Restoring a gradient to opposition restored it to the gap at
+the same time. The 20 mm `contact_distance` was never the thing holding the policy off the
+cap -- a dead factor was.
+
+The render agrees (`artifacts/oppfix_run/`): the cap sits on the bottle and fingers meet it from
+opposite sides, against the previous policy's one-sided hover.
+
+**What it costs, and what is still not right.** Real contact means real contact forces, so
+penetration rises from -0.309 mm to -0.781 mm, now past the M1 open-loop CPU reference of
+-0.566 mm though still sub-millimetre, and `EPA_HORIZON` returns after being clean. The cap also
+turns *faster* (199 deg/s, 12.5 turns an episode), so `rotate_clip` is bounding the reward and
+not the behaviour. And `tips on the cap at once` is 1.00 against the M1 scripted gait's 2.25:
+the thumb now holds continuously (0 regrips, 2.9 mm gap) while the index and middle gait 7 times
+each, which is a plausible shape for a lateral pinch but is not yet the scripted gait's grip.
+
+Single seed, 40M steps, one configuration. The next thing worth doing is equal-budget
+multi-seed runs before any of this is called a result, and only then deciding whether the
+remaining gap to 2.25 simultaneous contacts matters.
 
 ### The Brax/JAX pair does not work out of the box, in two places
 
 Neither is reachable by importing anything. The first fires several minutes into a run, after
 the env is built and the Warp kernels are compiled; the second only when a checkpoint is read
-back. Both would have been discovered on the H100, on the clock.
+back. Both would have been discovered on the rented box, on the clock.
 
 **1. `jax.device_put_replicated` is gone.** `ppo.train` calls it to replicate the training
 state across devices. JAX 0.11.2 removed the public alias as part of the `pmap` migration — not
@@ -865,7 +1350,7 @@ PRD asks for "every few minutes" because the machine can be killed with no warni
 at the M3 rate of 31,449 control-steps/s is about 80 minutes of simulation, so 24 evals is a
 checkpoint roughly every 3.5 minutes. Leap uses 10, which would be every 9.
 
-The 14 extra evals cost one eval rollout each: 1024 envs x 400 steps, about 30 s on the H100, so
+The 14 extra evals cost one eval rollout each: 1024 envs x 400 steps, about 30 s at the M3 rate, so
 about 7 minutes added to a ~2 hour run. That buys itself back the first time the box is
 preempted. `--checkpoint-every MIN` re-derives `num_evals` if preemption turns out to be more or
 less frequent than expected, including on a `--resume`, where the remaining budget is shorter
@@ -987,14 +1472,15 @@ wrist-twisting exploit.
   throughput is poor (PRD).
 - Warp has **no `ccd_iterations`/`ccd_tolerance` on its `opt`** at all, so the M1 setting of
   50/1e-8 is CPU-only. In practice it does not seem to matter: Warp's penetration (-0.109 mm) is
-  *lower* than CPU's (-0.566 mm) on the same trajectory. Worth a second look on the H100.
+  *lower* than CPU's (-0.566 mm) on the same trajectory. Worth a second look on the H200.
 - Warp warns that `('CAPSULE','CYLINDER')` and `('CAPSULE','MESH')` pairs have no multicontact
   support and get at most one contact point. Those are finger *links* against the cap and
   hand self-collisions; the fingertip/cap pair (mesh/mesh) is unaffected. Re-check if the policy
   starts using the middle phalanges to turn the cap.
 - **Does the nominal run clear 80%?** The M5 criterion, unanswered: nothing here has trained.
   Everything that produces the number is built and round-tripped on warp-cpu; what is missing
-  is about two hours of H100 time. Watch `eval/episode_success` and
+  is about two hours of H200 time, estimated from the M3 rate measured on the H100. Watch
+  `eval/episode_success` and
   `cap_rotation / cap_rotation_abs` in W&B from the first eval -- the second one says whether a
   rising success rate is a gait or an exploit, without waiting for a video.
 - **Does an untrained policy press hard enough to matter?** The `--smoke` policy (160 steps,

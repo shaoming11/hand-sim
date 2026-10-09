@@ -1,0 +1,98 @@
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+scene: timestep=0.00125 n_substeps=40 ccd_iterations=50 iterations=30 ls_iterations=50
+trajectory: squeeze_twist.npz, 192 control steps (9.6 s)
+
+CPU MuJoCo reference ...
+  final cap angle +59.37 deg   ncon max 12   nefc max 75   deepest penetration -0.574 mm
+
+probing MJX-warp with oversized buffers (naconmax=1024, njmax=1024) to measure the real counts ...
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA H200" (140 GiB, sm_90, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+Module mujoco.mjx.warp.ffi 4443472 load on device 'cuda:0' took 358.04 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.smooth 64d3b60 load on device 'cuda:0' took 5418.56 ms  (compiled)
+Module _nxn_broadphase__locals__kernel_04e59282 04e5928 load on device 'cuda:0' took 448.70 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_225f2df3 225f2df load on device 'cuda:0' took 11965.75 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_225f2df3 de77566 load on device 'cuda:0' took 12459.62 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_634d5bd2 634d5bd load on device 'cuda:0' took 11001.43 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_634d5bd2 05abb72 load on device 'cuda:0' took 10598.20 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_4cf231fa 4cf231f load on device 'cuda:0' took 12882.60 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_4cf231fa 666e900 load on device 'cuda:0' took 13224.10 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_fa2259a2 fa2259a load on device 'cuda:0' took 14527.89 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_fa2259a2 a119e8b load on device 'cuda:0' took 14131.53 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_470990fc 470990f load on device 'cuda:0' took 16348.22 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_470990fc 74f80f5 load on device 'cuda:0' took 16399.15 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_83e21906 83e2190 load on device 'cuda:0' took 17449.99 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_83e21906 6818794 load on device 'cuda:0' took 17251.44 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_0ae8dde6 0ae8dde load on device 'cuda:0' took 18021.71 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_0ae8dde6 c28c6c6 load on device 'cuda:0' took 18180.43 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_aadb0dd5 aadb0dd load on device 'cuda:0' took 19694.09 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_aadb0dd5 3f80def load on device 'cuda:0' took 19439.10 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_2b1a828f 2b1a828 load on device 'cuda:0' took 20773.94 ms  (compiled)
+Module ccd_kernel_builder__locals__ccd_kernel_2b1a828f cffec09 load on device 'cuda:0' took 20865.91 ms  (compiled)
+Module _primitive_narrowphase__locals__primitive_narrowphase_9d4e5dcb 9d4e5dc load on device 'cuda:0' took 2366.45 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.constraint 8d4d513 load on device 'cuda:0' took 75.61 ms  (compiled)
+Module _friction_dof__locals__kernel_f5f6cb7e f5f6cb7 load on device 'cuda:0' took 220.01 ms  (compiled)
+Module _friction_tendon__locals__kernel_66076d2a 66076d2 load on device 'cuda:0' took 240.05 ms  (compiled)
+Module _limit_slide_hinge__locals__kernel_3fb01e2e 3fb01e2 load on device 'cuda:0' took 213.84 ms  (compiled)
+Module _efc_contact_init__locals__kernel_50939fb1 50939fb load on device 'cuda:0' took 120.53 ms  (compiled)
+Module _efc_contact_jac_dense__locals__kernel_6b457580 747ee66 load on device 'cuda:0' took 519.61 ms  (compiled)
+Module _efc_contact_update__locals__kernel_807a87a8 807a87a load on device 'cuda:0' took 227.61 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.sensor fe10c99 load on device 'cuda:0' took 4011.83 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.forward 0b590b4 load on device 'cuda:0' took 3488.88 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.forward 10b70aa load on device 'cuda:0' took 3653.14 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.passive 29de081 load on device 'cuda:0' took 2784.43 ms  (compiled)
+Module _qfrc_passive_kernel__locals__kernel_976399dd 976399d load on device 'cuda:0' took 91.99 ms  (compiled)
+Module _qfrc_smooth__locals__kernel_8b823980 8b82398 load on device 'cuda:0' took 95.62 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.support 770ef7d load on device 'cuda:0' took 215.12 ms  (compiled)
+Module _small_cholesky_factorize_solve_block__locals__kernel_75195291 36079fe load on device 'cuda:0' took 116.19 ms  (compiled)
+Module _tile_cholesky_factorize_solve_block__locals__kernel_35660329 00561a4 load on device 'cuda:0' took 3511.19 ms  (compiled)
+Module _solve_init_dof__locals__kernel_021c7a0e 021c7a0 load on device 'cuda:0' took 72.15 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.solver 6f966b9 load on device 'cuda:0' took 833.67 ms  (compiled)
+Module _solve_init_jaref_kernel__locals__kernel_a13d0153 a13d015 load on device 'cuda:0' took 130.72 ms  (compiled)
+Module mul_m_kernel__locals___mul_m_f3de1cc7 f3de1cc load on device 'cuda:0' took 163.51 ms  (compiled)
+Module _update_constraint_efc__locals__kernel_0539aa50 0539aa5 load on device 'cuda:0' took 167.11 ms  (compiled)
+Module _update_constraint_init_qfrc_constraint_dense__locals__kernel_bd7ca2ec bd7ca2e load on device 'cuda:0' took 101.67 ms  (compiled)
+Module _update_gradient_zero_grad_dot__locals__kernel_b20934d7 b20934d load on device 'cuda:0' took 63.24 ms  (compiled)
+Module _update_gradient_grad__locals__kernel_c876081d c876081 load on device 'cuda:0' took 75.48 ms  (compiled)
+Module _update_gradient_JTDAJ_dense_tiled__locals__kernel_3134773e ebca885 load on device 'cuda:0' took 748.01 ms  (compiled)
+Module _update_gradient_cholesky__locals__kernel_2980eab1 7f6b756 load on device 'cuda:0' took 3152.49 ms  (compiled)
+Module _linesearch_iterative_kernel__locals__kernel_9b41a163 14dd0c1 load on device 'cuda:0' took 1318.02 ms  (compiled)
+Module _solve_done__locals__kernel_ce99440c ce99440 load on device 'cuda:0' took 141.14 ms  (compiled)
+Module mujoco.mjx.third_party.mujoco_warp._src.derivative 02a5c73 load on device 'cuda:0' took 1436.39 ms  (compiled)
+Module _next_time_builder__locals___next_time_bc454e15 bc454e1 load on device 'cuda:0' took 252.95 ms  (compiled)
+  final cap angle +60.37 deg   nacon max 11   ncollision max 22   nefc max 71
+  deepest penetration -0.113 mm   (CPU -0.574 mm)
+  solver used up to 9 of 30 iterations
+  overflow flags: none
+
+buffer sizing at 2x headroom
+  naconmax >=   44 per world   (driven by ncollision=22, NOT ncon=12)
+  njmax    >=  150 per world   (nefc=71)
+  naconmax is a total across worlds, so a 8192-env training run needs naconmax = 360448
+  njmax is per world, so it stays 150
+
+--- M2 criteria ---
+
+  1. CPU MuJoCo vs MJX-warp
+    final angle   CPU   +59.37 deg   other   +60.37 deg   difference   1.7% of the CPU total
+    worst gap along the trajectory:   2.1% of the CPU final angle
+    PASS (tolerance 10%)
+
+  2. CPU at sim_dt=0.00125 vs sim_dt=0.000625
+    final angle   CPU   +59.37 deg   other   +59.02 deg   difference   0.6% of the CPU total
+    worst gap along the trajectory:   1.3% of the CPU final angle
+    PASS (tolerance 10%)
+
+  3. overflow and stability
+    ncollision 22/1024   nacon 11/1024   nefc 71/1024
+    buffer overflow: none
+    all qpos finite: CPU True, MJX True
+    PASS
+
+M2: PASS

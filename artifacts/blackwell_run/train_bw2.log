@@ -1,0 +1,40 @@
+/workspace/venv/lib/python3.12/site-packages/mujoco/mjx/third_party/mujoco_warp/_src/io.py:663: UserWarning: MULTICCD is enabled, but the scene contains CCD pairs without multicontact support: [('CAPSULE', 'CYLINDER'), ('CAPSULE', 'MESH')]. At most 1 contact will be generated for these pairs.
+  warnings.warn(
+compat shims applied: jax.device_put_replicated, brax KERNEL_INITIALIZER[None]  (see capturn/compat.py)
+jax backend: gpu   devices: [CudaDevice(id=0)]
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA RTX PRO 6000 Blackwell Server Edition" (95 GiB, sm_120, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.17.0
+
+run: capturn-nominal-s1
+logdir: /workspace/hand-sim/logs/capturn-nominal-s1
+phase: nominal
+obs: {'privileged_state': (283,), 'state': (210,)}   action: 20
+budget: 40,000,000 steps from step 0 (of 40,000,000 total)
+num_envs: 8192   naconmax: 360,448   njmax: 150
+num_evals: 16  -> a checkpoint every 2,666,667 steps (~1.4 min at the M3 rate)
+
+           0   reward   +0.038   success   0.0%   net     +0.1 deg   net/gross +0.71
+   2,949,120   reward   +0.930   success   0.0%   net   +149.4 deg   net/gross +1.00
+   5,898,240   reward   +2.178   success   0.0%   net   +395.5 deg   net/gross +1.00
+   8,847,360   reward   +3.140   success   0.0%   net   +464.7 deg   net/gross +1.00
+  11,796,480   reward   +3.812   success   0.0%   net   +466.7 deg   net/gross +1.00
+  14,745,600   reward  +14.877   success 100.0%   net  +2386.7 deg   net/gross +1.00
+  17,694,720   reward  +16.834   success 100.0%   net  +2540.1 deg   net/gross +1.00
+  20,643,840   reward  +17.564   success 100.0%   net  +2664.3 deg   net/gross +1.00
+  23,592,960   reward  +18.573   success 100.0%   net  +2634.9 deg   net/gross +1.00
+  26,542,080   reward  +19.071   success 100.0%   net  +2560.3 deg   net/gross +1.00
+  29,491,200   reward  +19.252   success 100.0%   net  +2660.0 deg   net/gross +1.00
+  32,440,320   reward  +19.522   success 100.0%   net  +2645.8 deg   net/gross +1.00
+  35,389,440   reward  +19.874   success 100.0%   net  +3199.8 deg   net/gross +1.00
+  38,338,560   reward  +19.934   success 100.0%   net  +3209.0 deg   net/gross +1.00
+  41,287,680   reward  +20.061   success 100.0%   net  +3274.9 deg   net/gross +1.00
+  44,236,800   reward  +20.130   success 100.0%   net  +3398.0 deg   net/gross +1.00
+
+done in 1752.1 s (22,830 steps/s overall)
+final checkpoint: /workspace/hand-sim/logs/capturn-nominal-s1/checkpoints/from000000000000/000044236800  (global step 44,236,800)
+next: python3 scripts/eval.py /workspace/hand-sim/logs/capturn-nominal-s1/checkpoints/from000000000000/000044236800 --save 4
