@@ -35,8 +35,14 @@ of two seeds, one fails the task outright (0% success) and the other succeeds wi
 grasp than the three-finger config. The cause is measured -- the `idle_contact` cost penalises
 how *close* the unused fingers are rather than whether they are helping, and its tail is wide
 enough (0.368 at 10 mm) that the only way to satisfy it is to lift the whole hand off the cap.
-It would also penalise the M1 reference gait by -5.3 of return. Details in
-[`NOTES.md`](NOTES.md), M5.
+It would also penalise the M1 reference gait by -5.3 of return.
+
+Sharpening that cost (`idle_sharpness = 500`, validated first against the M1 gait, whose
+penalty falls to -0.37) **undoes the regression**: opposition back to +0.602, thumb/index gaps
+2.18/0.21 mm, penetration -0.198 mm and no warp overflow -- the best grasp numbers in the
+project. It does **not** achieve what the change was for: the middle finger backs off by 3.4 mm
+and stays the closest tip. Separating "resting on the cap" from "8 mm away" needs contact force,
+not a fingertip-site distance. Details in [`NOTES.md`](NOTES.md), M5.
 
 ## Setup (Mac, CPU)
 

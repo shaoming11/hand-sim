@@ -1319,6 +1319,57 @@ is disproven is costing idle fingers by distance. Worth trying next, in order:
   in the same run as `idle_contact`, so its own effect is unmeasured. Seed 2 held the thumb at
   1.70 mm and still failed, which suggests the pad is reachable and the index is the problem.
 
+#### Sharpening the idle cost: the grasp comes back, the middle finger does not leave
+
+`idle_sharpness = 500` (its own setting, no longer borrowing `grasp_sharpness = 100`), so the
+cost is 0.082 at 5 mm and 0.007 at 10 mm instead of 0.368 at 10 mm. Validated before training
+against the trajectory it must not punish: the M1 scripted gait's idle penalty falls from
+**-5.29 to -0.37** over an episode, while the three-finger policy that really does lean on its
+middle finger still pays **-2.50**. That is the discrimination the term was supposed to have --
+cost participation, not proximity. Seed 1 at 40M (the box was preempted during seed 2):
+
+| | 3-finger | 2-finger, broad cost | **2-finger, sharp cost** |
+|---|---|---|---|
+| success | 100% | 100% | **100%** |
+| opposition | +0.594 | -0.274 | **+0.602** |
+| thumb / index gap | 1.87 / 0.16 mm | 8.24 / 4.95 mm | **2.18 / 0.21 mm** |
+| grasp term | 0.642 | 0.110 | **0.615** |
+| mean angular velocity | 208 deg/s | 290 deg/s | 195 deg/s |
+| penetration | -0.547 mm | -0.268 mm | **-0.198 mm** |
+| warp overflow | none | EPA_HORIZON | **none** |
+
+**The regression is undone**: the grasp is back to the best numbers the project has produced,
+on the reward's own measure, and penetration is the cleanest yet.
+
+**But the change did not do what it was for.** Median fingertip gaps on the resulting policy:
+
+| | thumb | index | middle |
+|---|---|---|---|
+| 3-finger | 12.15 mm | 10.16 mm | **4.86 mm** |
+| 2-finger, sharp | 13.64 mm | 14.41 mm | **8.30 mm** |
+
+The middle finger is still the closest tip and still the one most often near the cap (65.8% of
+frames within 10 mm, against 71.3% before). It backed off by 3.4 mm and no further, because at
+sharpness 500 a finger sitting 8.3 mm out pays 0.016 -- nothing. 100 was too broad and punished
+the whole hand; 500 is too narrow and punishes nobody. The band where the middle finger
+actually works, roughly 5-10 mm, is the band the cost has to bite in, and it is the same band
+the index finger works in.
+
+**A caveat on every per-tip number above, including the ones in the sections before this.**
+`surface_distance` is measured from the fingertip *site*, which sits at the centre of the
+fingertip geom, so each gap carries that geom's radius as a fixed offset and a "gap" of 0 is
+unreachable. At a 1 mm threshold no policy registers contact on any finger -- not even the M1
+scripted gait, which reads 29.2% on the thumb and 0.0% on the index and middle. The project's
+10 mm convention exists because of this. These figures are therefore only meaningful against
+each other, never as absolute contact, and a term that wants real contact should read
+`data.contact` or a body-level gap rather than a tip site.
+
+Where this leaves the two-finger question: the pinch *grasp* is excellent and the middle finger
+is still participating. Separating those needs a cost that can tell a finger resting on the cap
+from one 8 mm away, which the tip-site distance cannot do well. Reading contact force on the
+idle geoms -- the second option listed above, skipped as the more expensive one -- is now the
+one worth doing.
+
 ### The Brax/JAX pair does not work out of the box, in two places
 
 Neither is reachable by importing anything. The first fires several minutes into a run, after

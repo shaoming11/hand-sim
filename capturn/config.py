@@ -81,6 +81,15 @@ def default_config() -> config_dict.ConfigDict:
             # 6.4 mm (exp -> 0.53) and the flick's thumb at 20 mm (exp -> 0.14, then zeroed by
             # the opposition factor anyway).
             grasp_sharpness=100.0,
+            # M5: the idle-finger cost needs a much tighter falloff than the grasp term. At
+            # `grasp_sharpness` (100) it reads 0.368 at 10 mm and 0.135 at 20 mm, so a middle
+            # finger parked clear of the cap still paid, and since the index and middle are
+            # adjacent the only way to stop paying was to lift the whole hand off -- which both
+            # seeds duly did, one of them failing the task outright. At 500 the cost is 0.082 at
+            # 5 mm and 0.007 at 10 mm: a finger that is merely near the cap is free, and only
+            # one actually on it pays. Checked against the M1 scripted gait, which this term
+            # must not punish: -5.3 of return at 100, -0.4 at 500.
+            idle_sharpness=500.0,
             # M5: was 2.0 rad/s (115 deg/s). Success needs 4*pi in 20 s, i.e. 0.63 rad/s, so 2.0
             # paid for spinning three times faster than the task asks; the flick policy
             # saturated this clip every step at 4.6 rad/s. 1.0 still leaves 1.6x headroom over

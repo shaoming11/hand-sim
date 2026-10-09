@@ -394,7 +394,7 @@ class CapTurn(mjx_env.MjxEnv):
             # little fingers already sit and so pay nothing. Clipped at zero from below so that
             # penetrating the cap cannot score better than resting on it.
             "idle_contact": jp.sum(jp.exp(
-                -self._config.reward_config.grasp_sharpness
+                -self._config.reward_config.idle_sharpness
                 * jp.maximum(self.idle_tip_gaps(data), 0.0)
             )),
             "action_rate": jp.sum(jp.square(action - info["last_act"])),
