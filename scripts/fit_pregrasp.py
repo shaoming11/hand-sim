@@ -15,7 +15,9 @@ Method
 2. Refine with L-BFGS-B over the mount pose (3 translation + 3 rotation-vector) and the 20
    actuator targets, so that the three gaiting fingertips sit on a circle of
    `cap_radius + standoff`, at the cap's mid-height, spread around the circumference, with
-   every geom pair clear of penetration.
+   every geom pair clear of penetration. M5: "spread around the circumference" became
+   "opposed", and the gaiting tips are the thumb and index finger only -- the middle finger
+   joined the idle set and is pushed clear of the cap by `IDLE_RADIUS`.
 3. Settle: run the real controller from the fitted pose until it stops moving, and use the
    settled state as the keyframe so the first simulated step is already an equilibrium.
 
@@ -45,8 +47,15 @@ SCENE = ROOT / "assets" / "scene.xml"
 HAND = ROOT / "assets" / "right_hand_mjx.xml"
 MENAGERIE_KEYFRAMES = ROOT / "assets" / "shadow_hand" / "keyframes.xml"
 
-GAIT_TIPS = ("rh_th_tip", "rh_ff_tip", "rh_mf_tip")
-IDLE_TIPS = ("rh_rf_tip", "rh_lf_tip")
+# M5: imported rather than redeclared, so the fitter and the env cannot drift apart. They had:
+# this file still fitted a three-finger tripod after `capturn.scene` moved to a two-finger
+# pinch, and the pose it produces is what decides whether the pinch is physically available.
+from capturn.scene import GAIT_TIPS, IDLE_TIPS  # noqa: E402
+
+# Seeding needs three non-collinear tips to define the hand's plane, which is a question about
+# the hand's orientation and not about which fingers pinch. It stays a tripod even though the
+# grasp does not.
+SEED_TIPS = ("rh_th_tip", "rh_ff_tip", "rh_mf_tip")
 
 STANDOFF = 0.003  # fingertip pad to cap wall at the pregrasp pose [m]
 MIN_STANDOFF = 0.002  # ... and no gaiting tip may start closer than this [m]
@@ -54,7 +63,16 @@ CLEARANCE = 0.002  # every geom pair must stay at least this far apart [m]
 BODY_CLEARANCE = 0.006  # ... and the hand must keep this far off the bottle itself [m]
 AXIAL_BAND = 0.004  # keep gaiting tips within this much of the cap mid-plane [m]
 IDLE_RADIUS = 0.030  # keep ring/little tips at least this far off the cap axis [m]
-MIN_TIP_SEP = 1.75  # minimum azimuthal separation between gaiting tips [rad]
+# M5: the two pinch tips want to be *opposed*, not merely separated. The old objective asked
+# for >= 1.75 rad between three tips spread round the circumference, and the pose it produced
+# could not oppose the thumb to the index at all: measured on it, the thumb is 1.54 mm from the
+# cap at 20% flexion but only 158 deg from the index, reaches 178 deg at 50% flexion by which
+# point it is 11.19 mm off the cap, and is 47 mm away by 65%. Its contact window and its
+# opposition window never overlapped, so the thumb could never press -- 0.0334 N*m at best
+# against the index finger's 0.1434, and nothing at high flexion. A pose search that *did*
+# enforce opposition found thumb+index squeezes worth 0.1974 N*m from the same two fingers,
+# 2.4x the fitted pregrasp. NOTES.md, M5.
+TIP_OPPOSITION = np.pi  # target azimuthal separation between the two pinch tips [rad]
 IK_MARGIN = 0.01  # temporary geom margin, so near-contacts are visible to the fitter [m]
 
 
@@ -166,7 +184,7 @@ class PregraspFitter:
         d.qpos[: q.size] = q
         mujoco.mj_forward(m, d)
 
-        tips = np.array([d.site(t).xpos for t in GAIT_TIPS])
+        tips = np.array([d.site(t).xpos for t in SEED_TIPS])
         # Orient the tripod plane normal along the cap axis. This normal becomes world +z, so
         # pick the sign pointing from the tips back towards the palm -- that is what leaves the
         # palm above the cap, reaching down, rather than underneath it inside the bottle.
@@ -182,7 +200,7 @@ class PregraspFitter:
 
         m.body_quat[self.forearm] = mat2quat(mat)
         mujoco.mj_forward(m, d)
-        pos = self.cap_centre - np.array([d.site(t).xpos for t in GAIT_TIPS]).mean(0)
+        pos = self.cap_centre - np.array([d.site(t).xpos for t in SEED_TIPS]).mean(0)
         return pos, mat
 
     def seed_params(self) -> np.ndarray:
@@ -239,14 +257,18 @@ class PregraspFitter:
         # Asymmetric floor on top of the symmetric target. A tip that starts already loaded
         # against the cap cannot squeeze -- a fit that left the thumb 0.7 mm off the wall scored
         # well on every other term and then gaited at 5 deg where a clean pose gets 88.
-        total += 5e6 * np.sum(np.maximum(0.0, (R + MIN_STANDOFF) - radial) ** 2)
+        # M5: 5e6 -> 5e8. With only two gaiting tips the optimiser has far fewer competing
+        # radial terms and happily traded the floor away for opposition, landing the index
+        # 0.18 mm off the cap -- pre-loaded, unable to squeeze, and failing
+        # `test_pregrasp_leaves_room_to_squeeze`. The floor has to outrank the opposition term.
+        total += 5e8 * np.sum(np.maximum(0.0, (R + MIN_STANDOFF) - radial) ** 2)
         total += 1e6 * np.sum(np.maximum(0.0, np.abs(tips[:, 2]) - AXIAL_BAND) ** 2)
 
         az = np.arctan2(tips[:, 1], tips[:, 0])
-        for i in range(3):
-            for j in range(i + 1, 3):
-                sep = abs(np.arctan2(np.sin(az[i] - az[j]), np.cos(az[i] - az[j])))
-                total += 2e4 * max(0.0, MIN_TIP_SEP - sep) ** 2
+        sep = abs(np.arctan2(np.sin(az[0] - az[1]), np.cos(az[0] - az[1])))
+        # Two-sided, unlike the old floor: a pinch is worse when the tips crowd one side *and*
+        # when they splay past each other, and only 180 deg lets the squeeze become pure torque.
+        total += 2e4 * (TIP_OPPOSITION - sep) ** 2
 
         idle = np.array([d.site(t).xpos for t in IDLE_TIPS]) - c
         idle_r = np.linalg.norm(idle[:, :2], axis=1)

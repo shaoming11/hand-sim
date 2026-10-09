@@ -115,7 +115,7 @@
   <worldbody>
     <!-- MOUNT: pos/quat below are fitted by scripts/fit_pregrasp.py. Do not hand-edit. -->
     <body name="rh_forearm" childclass="right_hand"
-      pos="0.158327 0.0255187 0.552298" quat="-0.0392589 0.941271 0.238297 -0.235971">
+      pos="0.182789 -0.00570019 0.543052" quat="-0.0609059 0.921989 0.257903 -0.282336">
       <inertial mass="3" pos="0 0 0.09" diaginertia="0.0138 0.0138 0.00744"/>
       <geom class="plastic_visual" mesh="forearm_0" material="gray"/>
       <geom class="plastic_visual" mesh="forearm_1"/>
