@@ -85,11 +85,31 @@
     <mesh class="right_hand" file="f_knuckle.obj"/>
     <mesh class="right_hand" file="f_proximal.obj"/>
     <mesh class="right_hand" file="f_middle.obj"/>
-    <mesh class="right_hand" file="f_distal_pst.obj"/>
+
+    <!-- M5: the two distal meshes are the only hand geoms that still collide as meshes; every
+         other phalanx is already a capsule or a box. Their convex hulls are 1065 and 1164
+         vertices against warp's EPA horizon, which is a compile-time 24 entries and carries no
+         model option -- 48x over, on the one pair that forms every cap contact. That is the
+         "simplify the fingertip meshes" item left open after the 50/80 run still logged 4,228
+         EPA_HORIZON overflows.
+
+         This is a fidelity fix, not the fix for the one-finger spin: penetration was already
+         measuring better than the M1 reference on both trained policies, and the -4.531 mm once
+         attributed to the flick policy is the *reset* pose, not the policy (see eval.py's
+         `penetration_mm`). What it buys is contact that warp can actually resolve in the
+         exploration states the policy learns from, plus CPU/warp parity 2.2% -> 0.2%.
+
+         `maxhullvert` caps the *collision* hull only -- the visual geoms share the mesh but are
+         contype=0, and mesh_vertnum stays 2691/2380, so the rendered tip is unchanged. 16 was
+         chosen by sweeping the M1 gait replay (artifacts/squeeze_twist.npz, CPU, 9.6 s): hull
+         1164 -> 16, rotation +59.43 -> +59.89 deg (0.8%), deepest penetration -0.117 -> -0.109
+         mm. 24 also works; 12 and 8 do not -- they whittle the pad into a point that bites and
+         rotation jumps 27% to +75.8 and +77.0 deg. NOTES.md, M5. -->
+    <mesh class="right_hand" file="f_distal_pst.obj" maxhullvert="16"/>
     <mesh class="right_hand" file="lf_metacarpal.obj"/>
     <mesh class="right_hand" file="th_proximal.obj"/>
     <mesh class="right_hand" file="th_middle.obj"/>
-    <mesh class="right_hand" file="th_distal_pst.obj"/>
+    <mesh class="right_hand" file="th_distal_pst.obj" maxhullvert="16"/>
   </asset>
 
   <worldbody>

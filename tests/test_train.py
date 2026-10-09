@@ -1,7 +1,7 @@
 """M5 acceptance checks for `scripts/train.py` and `scripts/eval.py`.
 
 The milestone itself ("success rate above 80% over 1000 eval episodes") can only be met by a
-real run on the H100. What is checkable here is everything that would make such a run wrong or
+real run on the H200. What is checkable here is everything that would make such a run wrong or
 unresumable, and in this project those are mostly places where the installed Brax and Playground
 do not behave the way their docstrings suggest:
 
@@ -206,10 +206,10 @@ def test_dr_phase_scales_the_env_level_hooks():
 
 def test_overrides_reach_nested_fields_and_reject_typos():
     env_cfg, _, ppo_cfg = train_script.build_configs(
-        args("--env-override", '{"reward_config.scales.reach": 0.15}',
+        args("--env-override", '{"reward_config.scales.grasp": 0.15}',
              "--ppo-override", '{"entropy_cost": 0.02}')
     )
-    assert env_cfg.reward_config.scales.reach == 0.15
+    assert env_cfg.reward_config.scales.grasp == 0.15
     assert ppo_cfg.entropy_cost == 0.02
     with pytest.raises(SystemExit):
         train_script.build_configs(args("--env-override", '{"reward_config.scales.rotat": 1.0}'))

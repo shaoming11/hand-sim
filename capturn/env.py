@@ -149,7 +149,35 @@ class CapTurn(mjx_env.MjxEnv):
         self._lowers, self._uppers = jp.array(lowers), jp.array(uppers)
 
         self._cap_radius, self._cap_half_height = scene.cap_dimensions(m)
+        self._cap_site = m.site("cap_site").id
+
+        # M5: the two surfaces a bottle-cap grasp actually uses. Resolved from body names, and
+        # every collision geom on those bodies counts -- the index finger's *side* is a
+        # legitimate contact, so this must not be narrowed to the fingertip.
+        self._thumb_geoms = self._collision_geoms(m, scene.THUMB_BODIES)
+        self._index_geoms = self._collision_geoms(m, scene.INDEX_BODIES)
+
         self._buffer_len = int(self._config.action_delay.max_steps) + 1
+
+    @staticmethod
+    def _collision_geoms(m: mujoco.MjModel, bodies: tuple[str, ...]) -> dict[str, Any]:
+        """Geom ids on `bodies` that can collide, with the radius and half-length each needs."""
+        ids = [
+            g for g in range(m.ngeom)
+            if m.body(m.geom_bodyid[g]).name in bodies
+            and (m.geom_contype[g] or m.geom_conaffinity[g])
+        ]
+        if not ids:
+            raise ValueError(f"no collision geoms on {bodies}")
+        capsule = mujoco.mjtGeom.mjGEOM_CAPSULE
+        return {
+            "ids": np.array(ids),
+            "radius": jp.array([float(m.geom_size[g, 0]) for g in ids]),
+            # Only a capsule has an axial extent to sample along; anything else is a point.
+            "half_length": jp.array(
+                [float(m.geom_size[g, 1]) if m.geom_type[g] == capsule else 0.0 for g in ids]
+            ),
+        }
 
     # ---------------------------------------------------------------------------------
     # rollout
@@ -200,6 +228,7 @@ class CapTurn(mjx_env.MjxEnv):
             "last_last_act": jp.zeros(N_ACTUATORS),
             "action_buffer": jp.zeros((self._buffer_len, N_ACTUATORS)),
             "last_cap_angle": cap_angle,
+            "ungrasped_steps": jp.zeros((), dtype=jp.int32),
         }
 
         # Every metric here is defined so that *summing it over an episode* is the
@@ -210,6 +239,12 @@ class CapTurn(mjx_env.MjxEnv):
         metrics["cap_rotation_abs"] = jp.zeros(())  # |d_theta| -> gross radians turned
         metrics["cap_angvel_per_step"] = jp.zeros(())  # -> mean angular velocity
         metrics["success"] = jp.zeros(())  # the 4*pi crossing -> the success flag
+        # M5: the grasp reward is a product, so a zero is ambiguous -- log the three parts
+        # separately to say whether the thumb is off the cap, the index is, or they are on the
+        # same side. `_per_step` is Brax's suffix for "divide by the episode length".
+        metrics["thumb_gap_per_step"] = jp.zeros(())
+        metrics["index_gap_per_step"] = jp.zeros(())
+        metrics["opposition_per_step"] = jp.zeros(())
 
         obs = self._get_obs(data, info, jp.zeros(self._config.history_len * FRAME_SIZE))
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
@@ -233,8 +268,21 @@ class CapTurn(mjx_env.MjxEnv):
         d_theta = cap_angle - info["last_cap_angle"]
         rotation = cap_angle - info["cap_angle_init"]
 
-        done = self._get_termination(data)
-        terms = self._get_reward(data, action, info, d_theta, rotation)
+        # Computed once and threaded through: the reward, the termination and three metrics
+        # all want it, and it walks every collision geom on two fingers.
+        grasp = self.grasp_state(data)
+        thumb_gap, index_gap, opposition = grasp
+
+        # M5: a gait *has* to let go to regrip, so losing contact for an instant is not a
+        # failure -- terminating on it would end the M1 gait on 15% of its own steps. What
+        # separates the two is how long the grasp stays off: the scripted gait's longest
+        # release is 3 control steps, the flick policy hovers for 18 at a time, 11 times an
+        # episode. The counter resets to zero the moment both surfaces are back on the cap.
+        ungrasped = jp.maximum(thumb_gap, index_gap) > self._config.contact_distance
+        info["ungrasped_steps"] = (info["ungrasped_steps"] + 1) * ungrasped
+
+        done = self._get_termination(data, info["ungrasped_steps"])
+        terms = self._get_reward(data, action, info, d_theta, rotation, grasp)
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in terms.items()}
         # Playground's convention: the terms are rates and the sum is integrated over the
         # control period. The rotate term is then literally radians turned this step.
@@ -255,6 +303,9 @@ class CapTurn(mjx_env.MjxEnv):
         state.metrics["cap_rotation_abs"] = jp.abs(d_theta)
         state.metrics["cap_angvel_per_step"] = self._cap_angvel(data)
         state.metrics["success"] = terms["success"]
+        state.metrics["thumb_gap_per_step"] = thumb_gap
+        state.metrics["index_gap_per_step"] = index_gap
+        state.metrics["opposition_per_step"] = opposition
 
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
 
@@ -300,8 +351,9 @@ class CapTurn(mjx_env.MjxEnv):
         info: Dict[str, Any],
         d_theta: jax.Array,
         rotation: jax.Array,
+        grasp: tuple[jax.Array, jax.Array, jax.Array],
     ) -> Dict[str, jax.Array]:
-        gaps = self.tip_gaps(data)
+        thumb_gap, index_gap, opposition = grasp
         threshold = self._config.success_rotation
         # Fires on the control step that crosses the threshold going forward. A latch in `info`
         # would be exactly one-time, but it evolves during the episode and so would go stale
@@ -309,20 +361,49 @@ class CapTurn(mjx_env.MjxEnv):
         # than a bonus that can fire twice if the cap happens to oscillate across 4*pi.
         crossed = (rotation >= threshold) & (rotation - d_theta < threshold) & (d_theta > 0)
         return {
-            "rotate": jp.clip(d_theta / self.dt, -0.5, 2.0),
-            "reach": jp.exp(-self._config.reward_config.reach_sharpness * jp.mean(gaps)),
+            "rotate": jp.clip(d_theta / self.dt, -0.5, self._config.reward_config.rotate_clip),
+            # M5: replaces `reach`, which measured how close three fingertip *sites* were to the
+            # cap and so could not see the grasp the first policy actually used -- the side of
+            # the index finger, with the thumb absent. This asks for the real thing: both
+            # surfaces on the cap (the worse of the two sets the exponential) *and* opposed.
+            #
+            # M5, after the first Blackwell run: the opposition factor was
+            # `jp.clip(opposition, 0.0, 1.0)`, and that gate made the whole term inert. `clip`
+            # is flat below zero -- value *and* derivative are exactly 0.0 -- and the trained
+            # policy sat at an opposition of -0.627, on the same side of the cap, 98.4% of the
+            # time. So the term paid 0.000 at the median and, more to the point, pointed
+            # nowhere: there was no gradient by which the policy could discover opposition from
+            # where it started. It optimised `rotate` alone and hovered just inside the
+            # grasp-loss bound. Measured in NOTES.md, M5.
+            #
+            # `0.5 * (1 + opposition)` is the same preference without the cliff: it maps
+            # opposition onto (0, 1], is monotone, so more opposed is always worth more, and
+            # has a constant non-zero derivative everywhere, including the same-side region the
+            # policy actually starts in. Crowding the same side still scores poorly (0.19 at
+            # -0.627 against 1.0 fully opposed) -- it is no longer *unlearnable*.
+            "grasp": (
+                jp.exp(-self._config.reward_config.grasp_sharpness
+                       * jp.maximum(thumb_gap, index_gap))
+                * (0.5 * (1.0 + opposition))
+            ),
             "action_rate": jp.sum(jp.square(action - info["last_act"])),
             "torques": jp.sum(jp.square(data.actuator_force)),
             "joint_vel": jp.sum(jp.square(data.qvel[self._hand_dqids])),
             "success": crossed.astype(float),
         }
 
-    def _get_termination(self, data: mjx.Data) -> jax.Array:
+    def _get_termination(self, data: mjx.Data, ungrasped_steps: jax.Array) -> jax.Array:
         nan = ~jp.isfinite(data.qpos).all() | ~jp.isfinite(data.qvel).all()
         if not self._config.early_termination:
             return nan
         dropped = (self.tip_gaps(data) > self._config.drop_distance).all()
-        return nan | dropped
+        # M5: `drop_distance` (10 cm) only fires once the cap is gone entirely, and the first
+        # policy sat well inside it -- thumb 20 mm out, pushing the cap one-sidedly with the
+        # index finger. This is the tighter test, on a grace period so that a legitimate
+        # regrip survives it. Opposition is deliberately not part of it: it is shaped by the
+        # reward, and a hard rule on it would end an episode in the middle of a regrip.
+        let_go = ungrasped_steps >= self._config.grasp_grace_steps
+        return nan | dropped | let_go
 
     # ---------------------------------------------------------------------------------
     # sensor readings
@@ -340,6 +421,33 @@ class CapTurn(mjx_env.MjxEnv):
     def _tip_positions(self, data: mjx.Data, sensors: tuple[str, ...]) -> jax.Array:
         """Fingertip positions in the cap frame, (len(sensors), 3)."""
         return jp.stack([self._sensor(data, s) for s in sensors])
+
+    def grasp_state(self, data: mjx.Data) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """`(thumb_gap, index_gap, opposition)` -- what a bottle-cap grasp is made of.
+
+        The gaps are surface-to-surface, in metres, to the closest point on any collision geom
+        of that finger; `opposition` is +1 when the two touch the cap from exactly opposite
+        sides and -1 when they crowd the same side. A real lateral pinch is thumb pad against
+        the side of the index finger, so what matters is that both are on the cap and that they
+        are opposed -- not which part of the finger is doing it.
+
+        Public because `scripts/eval.py` reports all three.
+        """
+        origin = data.site_xpos[self._cap_site]
+        mat = data.site_xmat[self._cap_site].reshape(3, 3)
+
+        def closest(group: dict[str, Any]) -> tuple[jax.Array, jax.Array]:
+            ids = group["ids"]
+            points = scene.segment_points(
+                data.geom_xpos[ids], data.geom_xmat[ids].reshape(-1, 3, 3), group["half_length"]
+            )
+            return scene.grasp_geometry(
+                points, group["radius"], origin, mat, self._cap_radius, self._cap_half_height
+            )
+
+        thumb_gap, thumb_dir = closest(self._thumb_geoms)
+        index_gap, index_dir = closest(self._index_geoms)
+        return thumb_gap, index_gap, -jp.dot(thumb_dir, index_dir)
 
     def tip_gaps(self, data: mjx.Data) -> jax.Array:
         """Gap from each gaiting fingertip to the cap surface, (3,).

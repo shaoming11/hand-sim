@@ -9,10 +9,16 @@ Run this on the GPU box. It works on a CPU-only Mac too, but only for tiny `--nu
 warp-cpu manages a few hundred sim-steps/s, so treat local runs as a correctness check on the
 script, never as throughput data.
 
-Before running on the H100:
+Before running on the H200:
 
     export XLA_PYTHON_CLIENT_PREALLOCATE=false   # or JAX takes the VRAM Warp needs
-    export MUJOCO_GL=egl
+    unset MUJOCO_GL                              # EGL was broken on the M3 image and makes
+                                                 # `import mujoco` fail (NOTES.md, M3)
+
+**One `num_envs` per process when the result matters.** The default list sweeps several counts
+in one process, and with PREALLOCATE=false JAX's pool only ever grows, so the largest count can
+fail to allocate even when it fits fine in a fresh process. That is what happened to 16384 on
+the H100; pass a single `--num-envs` per run before believing a failure (NOTES.md, M3).
 
 Two things this measures that a naive timing loop would miss:
 

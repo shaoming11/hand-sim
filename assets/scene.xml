@@ -11,7 +11,7 @@
        worst case is 7.4 mm, at the default 35 it is 3.2 mm, and at 50 / 1e-8 it is 1.3 mm.
        Measured in NOTES.md, M1. Re-check the throughput cost at M3. -->
   <option timestep="0.00125" integrator="implicitfast" cone="elliptic" impratio="10"
-          solver="Newton" iterations="30" ls_iterations="50"
+          solver="Newton" iterations="50" ls_iterations="80"
           ccd_iterations="50" ccd_tolerance="1e-8"/>
 
   <statistic center="0 0 0.2" extent="0.35" meansize="0.01"/>

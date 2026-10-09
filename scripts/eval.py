@@ -19,7 +19,7 @@ PRD M5 is two criteria, and the second one is the one that is easy to fake:
      gaiting with no exploit (flicking, penetration, vibrating the cap)"
 
 A success rate alone cannot distinguish a gait from a policy that has found a way to spin the
-cap without ever letting go of it, so this reports four numbers that separate them, none of
+cap without ever letting go of it, so this reports five numbers that separate them, none of
 which needs the contact buffer:
 
 * **net / gross rotation.** `sum(d_theta) / sum(|d_theta|)`. A gait pushes one way and resets
@@ -30,6 +30,9 @@ which needs the contact buffer:
   `--release-gap` is released -- so chatter around one threshold does not inflate it. Zero
   regrips with a high success rate means the cap is being turned without gaiting, which at
   this wrist range means a wrist twist or a flick.
+* **simultaneous contacts.** How many gaiting tips are inside `--contact-gap` at the same
+  instant. `regrips` counts each tip on its own, so it cannot tell one finger working alone
+  from three taking turns; this can. The M1 scripted gait averages 2.25, the flick policy 1.
 * **wrist share of the joint travel.** The wrist has 2 of the 24 joints. If it accounts for
   most of the motion, the fingers are passengers.
 * **deepest penetration.** Measured on the saved trajectories by replaying them through CPU
@@ -217,6 +220,15 @@ def rollout(env: CapTurn, policy, num_envs: int, seed: int) -> dict[str, np.ndar
             "action": action,
             "alive": was_alive,
         }
+        # M5: the fingertip `gaps` above cannot see the grasp this task actually asks for -- a
+        # lateral pinch puts the *side* of the index finger on the cap, not its tip -- so every
+        # tip-based number here reads as "off the cap" for a perfectly good pinch. These are the
+        # three quantities the reward itself is built from, which is what `grasp_state`'s
+        # docstring promises and what was missing when the first Blackwell run was evaluated.
+        thumb_gap, index_gap, opposition = jax.vmap(env.grasp_state)(nstate.data)
+        out["thumb_gap"] = thumb_gap
+        out["index_gap"] = index_gap
+        out["opposition"] = opposition
         # Warp reports solver and buffer overflow through a bitmask on the Data rather than an
         # exception, and prints its warnings from inside kernels where Python cannot see them.
         # M2 checked this on the open-loop gait; a policy loads the contacts differently, so it
@@ -277,6 +289,37 @@ def make_policy(ckpt: pathlib.Path, deterministic: bool):
 # --------------------------------------------------------------------------------------
 # summary
 # --------------------------------------------------------------------------------------
+def grasp_summary(traj: dict[str, np.ndarray], live: np.ndarray, env_config) -> dict:
+    """The lateral pinch, measured the way the reward measures it.
+
+    `opposition` is +1 when the thumb and the index finger meet the cap from opposite sides and
+    -1 when they crowd the same side, and the reward multiplies by `clip(opposition, 0, 1)` --
+    so a negative median means the grasp term is contributing *nothing* and the policy is
+    succeeding on rotation alone. `held` is the fraction of steps inside `contact_distance`,
+    the same threshold the grasp-loss termination uses: a policy can keep that satisfied, and
+    so never terminate, while still never closing an opposed pinch.
+    """
+    if "thumb_gap" not in traj:          # a trajectory recorded before these were collected
+        return {}
+    thumb, index = traj["thumb_gap"][live], traj["index_gap"][live]
+    opposition = traj["opposition"][live]
+    worst = np.maximum(thumb, index)
+    contact = float(env_config.contact_distance)
+    sharpness = float(env_config.reward_config.grasp_sharpness)
+    term = np.exp(-sharpness * worst) * np.clip(opposition, 0.0, 1.0)
+    return {
+        "thumb_gap_mm": {"median": float(np.median(thumb)) * 1e3,
+                         "p90": float(np.percentile(thumb, 90)) * 1e3},
+        "index_gap_mm": {"median": float(np.median(index)) * 1e3,
+                         "p90": float(np.percentile(index, 90)) * 1e3},
+        "opposition": {"median": float(np.median(opposition)),
+                       "frac_opposed": float((opposition > 0).mean())},
+        "frac_steps_both_within_contact_distance": float((worst <= contact).mean()),
+        "contact_distance_mm": contact * 1e3,
+        "grasp_term_median": float(np.median(term)),
+    }
+
+
 def count_regrips(gaps: np.ndarray, alive: np.ndarray,
                   contact: float, release: float) -> np.ndarray:
     """Release-then-regrip events per (episode, fingertip), with hysteresis.
@@ -318,6 +361,13 @@ def summarize(env: CapTurn, traj: dict[str, np.ndarray], args: argparse.Namespac
     rate = float(success.mean())
     regrips = count_regrips(traj["gaps"], alive, args.contact_gap, args.release_gap)
 
+    # M5: the number that separates a two-finger grasp from the flick exploit. `regrips` counts
+    # each tip's events independently, so one finger working alone and three taking turns can
+    # produce similar totals; this counts how many are on the cap *at the same instant*. The M1
+    # scripted gait holds 2.25 cap contacts on average; the flick policy holds one.
+    live_steps = alive > 0
+    simultaneous = (traj["gaps"] < args.contact_gap).sum(axis=2)[live_steps]
+
     from mujoco_playground._src import mjx_env
 
     model = env.mj_model
@@ -353,6 +403,13 @@ def summarize(env: CapTurn, traj: dict[str, np.ndarray], args: argparse.Namespac
             tip: float(regrips[:, i].mean()) for i, tip in enumerate(scene.GAIT_TIPS)
         },
         "episodes_with_no_regrip": float((regrips.sum(axis=1) == 0).mean()),
+        "grasp": grasp_summary(traj, live_steps, env._config),
+        "simultaneous_contacts": {
+            "median": float(np.median(simultaneous)),
+            "mean": float(simultaneous.mean()),
+            "frac_steps_multi_contact": float((simultaneous >= 2).mean()),
+            "frac_steps_no_contact": float((simultaneous == 0).mean()),
+        },
         "wrist_share_of_travel": float(wrist_share.mean()),
         "wrist_joint_count": len(wrist),
         "hand_joint_count": len(hand_joints),
@@ -368,25 +425,37 @@ def summarize(env: CapTurn, traj: dict[str, np.ndarray], args: argparse.Namespac
     }
 
 
-def penetration_mm(qpos: np.ndarray) -> float:
+def penetration_mm(qpos: np.ndarray) -> tuple[float, float]:
     """Deepest contact penetration over a saved trajectory, via CPU MuJoCo.
 
-    `mj_forward` on each frame gives the contact set for that pose, which is what M1 and M2
-    reported, so the number is directly comparable to the -0.1 mm the open-loop gait managed.
-    Only the frames that get saved are replayed, so this is cheap.
+    Returns `(policy_mm, reset_mm)`: the deepest penetration the *policy* drives the hand into,
+    and the one already present in frame 0.
+
+    Splitting the two is not cosmetic. Frame 0 is the reset pose, and `reset_noise.hand_qpos`
+    perturbs 24 joints by up to 0.05 rad with no collision check, so some resets start with a
+    fingertip several mm inside the cap. That has nothing to do with what the policy learned,
+    and because the reset states are seeded it is the *same* number for every policy -- it was
+    reported as -4.531 mm for two completely different policies at M5 before this was split
+    out, which is what gave the first H200 run a penetration exploit it did not have. The
+    policy figure is the one comparable to M1's -0.566 mm CPU / -0.104 mm warp.
+
+    `mj_forward` on each frame gives the contact set for that pose. Only the frames that get
+    saved are replayed, so this is cheap.
     """
     import mujoco
 
     model = mujoco.MjModel.from_xml_path(scene.SCENE.as_posix())
     data = mujoco.MjData(model)
-    worst = 0.0
-    for q in qpos:
+
+    def deepest(q: np.ndarray) -> float:
         data.qpos[:] = q
         data.qvel[:] = 0.0
         mujoco.mj_forward(model, data)
-        for i in range(data.ncon):
-            worst = min(worst, float(data.contact[i].dist))
-    return worst * 1e3
+        return min((float(data.contact[i].dist) for i in range(data.ncon)), default=0.0)
+
+    reset = deepest(qpos[0]) if len(qpos) else 0.0
+    policy = min((deepest(q) for q in qpos[1:]), default=0.0)
+    return policy * 1e3, reset * 1e3
 
 
 def save_episodes(traj: dict[str, np.ndarray], which: np.ndarray, prefix: pathlib.Path,
@@ -468,9 +537,9 @@ def main(argv: list[str] | None = None) -> None:
         saved = save_episodes(traj, which, prefix, float(env.dt))
         summary["saved"] = [p.as_posix() for p in saved]
         summary["saved_net_rotation_deg"] = [float(net[i] * RAD2DEG) for i in which]
-        summary["worst_penetration_mm"] = min(
-            penetration_mm(np.load(p)["qpos"]) for p in saved
-        )
+        measured = [penetration_mm(np.load(p)["qpos"]) for p in saved]
+        summary["worst_penetration_mm"] = min(policy for policy, _ in measured)
+        summary["reset_penetration_mm"] = min(reset for _, reset in measured)
 
     # ------------------------------------------------------------------ report
     rate, err = summary["success_rate"], summary["success_stderr"]
@@ -494,12 +563,33 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  regrips, {tip:<10}     {count:7.2f} per episode")
     print(f"  episodes with none      {summary['episodes_with_no_regrip'] * 100:6.2f}%   "
           "(high = turning the cap without gaiting)")
+    sim = summary["simultaneous_contacts"]
+    print(f"  tips on the cap at once {sim['median']:7.2f}   "
+          f"median (M1 scripted gait 2.25, flick exploit 1)")
+    print(f"  steps with 2+ tips      {sim['frac_steps_multi_contact'] * 100:6.2f}%   "
+          f"(steps with none {sim['frac_steps_no_contact'] * 100:.2f}%)")
+    g = summary["grasp"]
+    if g:
+        print(f"  thumb gap               {g['thumb_gap_mm']['median']:6.2f} mm median   "
+              f"(p90 {g['thumb_gap_mm']['p90']:.2f})")
+        print(f"  index gap               {g['index_gap_mm']['median']:6.2f} mm median   "
+              f"(p90 {g['index_gap_mm']['p90']:.2f})")
+        print(f"  opposition              {g['opposition']['median']:+6.3f} median   "
+              f"opposed on {g['opposition']['frac_opposed'] * 100:.1f}% of steps "
+              "(+1 = opposite sides, -1 = same side)")
+        print(f"  both within {g['contact_distance_mm']:.0f} mm        "
+              f"{g['frac_steps_both_within_contact_distance'] * 100:6.2f}% of steps   "
+              "(the grasp-loss termination threshold)")
+        print(f"  grasp reward term       {g['grasp_term_median']:6.3f} median   "
+              "(0 = the grasp term is paying nothing)")
     print(f"  wrist share of travel   {summary['wrist_share_of_travel'] * 100:6.2f}%   "
           f"({summary['wrist_joint_count']} of {summary['hand_joint_count']} joints)")
     print(f"  action chatter          {summary['action_chatter']:7.4f} per step")
     if "worst_penetration_mm" in summary:
         print(f"  deepest penetration     {summary['worst_penetration_mm']:+7.3f} mm   "
               "(M1 open-loop: -0.566 CPU, -0.104 warp)")
+        print(f"  reset-pose penetration  {summary['reset_penetration_mm']:+7.3f} mm   "
+              "(frame 0, from reset_noise -- not the policy's doing)")
     flags = summary["overflow_flags"]
     print(f"  warp overflow           {', '.join(flags) or 'none'}")
     # The PRD's M2 criterion, re-checked on a policy trajectory: a policy loads the contacts

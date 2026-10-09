@@ -27,6 +27,51 @@ ALL_TIP_SENSORS = GAIT_TIP_SENSORS + ("rf_tip_position", "lf_tip_position")
 
 CAP_JOINT = "cap_hinge"
 
+# M5: what a bottle-cap grasp actually is. A person opposes the thumb pad against the *side* of
+# the index finger -- a lateral pinch -- not a tripod of fingertips. The first trained policy got
+# half of this right by itself: it drove the cap with `rh_ffmiddle` and `rh_ffproximal`, the
+# correct surfaces, but never brought the thumb in, so its contacts sat 66 deg apart instead of
+# opposed and the grip was a one-sided push. Contact anywhere on these bodies counts.
+THUMB_BODIES = ("rh_thdistal", "rh_thmiddle")
+INDEX_BODIES = ("rh_ffdistal", "rh_ffmiddle", "rh_ffproximal")
+# Samples along each capsule's axis. The closest point on a finger segment is usually not an
+# endpoint, and 5 is enough to find it to well under a millimetre on a 25 mm capsule.
+SEGMENT_SAMPLES = 5
+
+
+def segment_points(xpos, xmat, half_length, samples: int = SEGMENT_SAMPLES):
+    """Points along each geom's local z axis: (n_geoms, samples, 3), in world coordinates.
+
+    `xpos` is (n, 3), `xmat` is (n, 3, 3) and `half_length` is (n,) -- zero for anything that is
+    not a capsule, which then contributes its centre alone. Plain operators, so this works under
+    `jit` on jax arrays and on numpy in the CPU scripts.
+    """
+    # A numpy constant broadcasts against jax arrays, so this one expression serves both.
+    t = np.linspace(-1.0, 1.0, samples)
+    axis = xmat[:, :, 2]                                   # (n, 3) local z in world
+    offsets = axis[:, None, :] * (half_length[:, None] * t[None, :])[..., None]
+    return xpos[:, None, :] + offsets
+
+
+def grasp_geometry(points, geom_radius, origin, mat, cap_radius: float, cap_half_h: float):
+    """Closest approach of a group of geoms to the cap, and the direction it approaches from.
+
+    `points` is (n_geoms, samples, 3) in world coordinates, `geom_radius` is (n_geoms,).
+    Returns `(gap, unit_radial)`: the smallest surface-to-surface gap over every sample, and the
+    horizontal unit vector in the cap frame pointing from the cap axis towards that closest
+    sample. The unit vector is what makes opposition measurable -- two grips are opposed when
+    their vectors point opposite ways, which is a dot product rather than an angle, so there is
+    no wrap-around to handle.
+    """
+    local = (points - origin) @ mat                        # world -> cap frame
+    gaps = surface_distance(local, cap_radius, cap_half_h) - geom_radius[:, None]
+    flat = gaps.reshape(-1)
+    best = flat.argmin()
+    closest = local.reshape(-1, 3)[best]
+    planar = closest[:2]
+    norm = (planar[0] ** 2 + planar[1] ** 2) ** 0.5
+    return flat[best], planar / (norm + 1e-9)
+
 
 def cap_dimensions(model: mujoco.MjModel) -> tuple[float, float]:
     """The cap's outer radius and half-height, in metres.

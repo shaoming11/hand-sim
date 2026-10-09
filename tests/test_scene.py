@@ -56,6 +56,53 @@ def test_cap_bottle_pair_is_excluded(scene):
         assert not (cap_geom in pair and pair & bottle_geoms), "cap is colliding with the bottle"
 
 
+# M5: warp's EPA horizon is a compile-time 24 entries with no model option, so a collision mesh
+# whose convex hull is larger than that can return a wrong contact depth. Hulls that do not reach
+# the cap are allowed to stay large, with the reason recorded here rather than left implicit.
+EPA_HORIZON = 24
+OVERSIZED_HULLS_ALLOWED = {
+    # The base is fixed and the forearm is half a hand away from the cap, so it never forms a
+    # cap contact. Shrinking it would only perturb hand self-collision.
+    "forearm_collision": "cannot reach the cap; the hand base is fixed",
+    # M2 measured this the other way round: a *cylinder* cap overflowed EPA every step and the
+    # 32-vertex prism did not. The cap side is deliberate -- NOTES.md, M2.
+    "cap_prism": "M2 chose the prism precisely because it does not overflow",
+}
+
+
+def test_cap_contact_hulls_fit_the_epa_horizon(scene):
+    """M5. The flick exploit: 1065- and 1164-vertex fingertip hulls against a 24-entry horizon.
+
+    Anything that can touch the cap must collide as a hull warp can actually resolve, or the
+    policy gets to drive the cap through it. Regression for `NOTES.md`, "the flick exploit".
+    """
+    model, _ = scene
+    oversized = {}
+    for g in range(model.ngeom):
+        if model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+            continue
+        if model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0:
+            continue  # visual only
+        mesh = model.mesh(model.geom_dataid[g])
+        adr = model.mesh_graphadr[mesh.id]
+        hull = int(model.mesh_graph[adr]) if adr >= 0 else 0
+        if hull > EPA_HORIZON and mesh.name not in OVERSIZED_HULLS_ALLOWED:
+            oversized[mesh.name] = hull
+    assert not oversized, (
+        f"collision hulls over warp's {EPA_HORIZON}-entry EPA horizon: {oversized}. "
+        "Cap them with `maxhullvert` on the mesh asset, or record why they cannot reach the cap."
+    )
+
+
+def test_fingertips_still_look_like_fingertips(scene):
+    """`maxhullvert` must cap the collision hull only, never the rendered mesh."""
+    model, _ = scene
+    for name in ("f_distal_pst", "th_distal_pst"):
+        mesh = model.mesh(name)
+        assert model.mesh_vertnum[mesh.id] > 2000, "the visual mesh was decimated too"
+        assert int(model.mesh_graph[model.mesh_graphadr[mesh.id]]) <= EPA_HORIZON
+
+
 def test_hand_does_not_penetrate_the_bottle(scene):
     """PRD M0. Touching the cap at pregrasp is fine and expected; touching the bottle is not."""
     model, data = scene

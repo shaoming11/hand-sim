@@ -20,7 +20,11 @@ from ml_collections import config_dict
 NACONMAX_PER_WORLD = 44
 NJMAX = 150
 
-# M3: 8192 is the largest that fits. 16384 fails to allocate warp's multiccd_polygon buffer.
+# M3: the highest measured throughput, and it matches Playground's tuned LeapCubeRotateZAxis
+# config so the whole PPO block transfers unchanged. The old comment here said 8192 "is the
+# largest that fits" -- that was wrong. 16384 allocates fine on the H200 in a fresh process
+# (the H100 failure was the documented single-process JAX/Warp starvation mode), it is just
+# 4.6% *slower*: 30,856 vs 32,358 control-steps/s. 8192 wins on merit. NOTES.md, M3.
 NUM_ENVS = 8192
 
 
@@ -39,6 +43,18 @@ def default_config() -> config_dict.ConfigDict:
         early_termination=True,
         # Terminate when all three gaiting fingertips are this far from the cap surface.
         drop_distance=0.10,
+        # M5: a second, much tighter termination -- both grasp surfaces must still be on the
+        # cap. `drop_distance` only fires once the cap is gone entirely, and the flick policy
+        # sat well inside it. 20 mm is read off the recordings: the M1 gait's thumb sits at
+        # 2.2 mm and its index at 6.4 mm, and its release phase backs off 8 mm, so it clears
+        # this comfortably; the flick policy's thumb sits at 20-22 mm.
+        contact_distance=0.020,
+        # M5: how many consecutive control steps the grasp may be lost before the episode ends.
+        # A gait must release to regrip, so this cannot be instantaneous -- at 1 step it would
+        # terminate the M1 scripted gait on 15% of its own steps. Measured on the recordings:
+        # the gait's longest release is 3 steps, while the flick policy hovers for 18 at a
+        # time and does it 11 times an episode. 8 sits between them with room either side.
+        grasp_grace_steps=8,
         # Success: cumulative rotation within the episode, i.e. two full turns.
         success_rotation=float(4.0 * np.pi),
         reset_noise=config_dict.create(
@@ -57,12 +73,29 @@ def default_config() -> config_dict.ConfigDict:
         # fixed from day one. Nominal uses index 0, i.e. no delay.
         action_delay=config_dict.create(enabled=False, max_steps=2),
         reward_config=config_dict.create(
-            reach_sharpness=20.0,
+            # M5: the PRD's `reach` was exp(-20 * mean gap of three fingertip sites). It could
+            # not see the grasp the first policy used -- the side of the index finger -- and
+            # averaging let one fingertip pay for two curled away. `grasp` replaces it: both
+            # the thumb and the index finger on the cap, anywhere along their length, and
+            # opposed. 100 is set off the recordings, where the M1 gait's worse surface sits at
+            # 6.4 mm (exp -> 0.53) and the flick's thumb at 20 mm (exp -> 0.14, then zeroed by
+            # the opposition factor anyway).
+            grasp_sharpness=100.0,
+            # M5: was 2.0 rad/s (115 deg/s). Success needs 4*pi in 20 s, i.e. 0.63 rad/s, so 2.0
+            # paid for spinning three times faster than the task asks; the flick policy
+            # saturated this clip every step at 4.6 rad/s. 1.0 still leaves 1.6x headroom over
+            # the success rate and the M1 gait only reaches 0.11 rad/s, so nothing legitimate
+            # touches it.
+            rotate_clip=1.0,
             # PRD weights, with the sign of each cost moved from its definition into the weight
             # so the logged `reward/*` metrics read as signed contributions.
             scales=config_dict.create(
                 rotate=1.0,
-                reach=0.5,
+                # M5: 0.5 -> 0.15. At the pregrasp pose the old `reach` was 99.9% of the
+                # signal and parking for a whole episode returned 8.93 against ~21 for
+                # succeeding. With the sharper, opposition-gated term and this weight, parking
+                # returns ~1.2 against ~14 for succeeding.
+                grasp=0.15,
                 action_rate=-0.01,
                 torques=-1e-3,
                 joint_vel=-1e-4,
@@ -70,7 +103,7 @@ def default_config() -> config_dict.ConfigDict:
             ),
         ),
         # M2: `impl='jax'` cannot load this scene at all (no cylinder/mesh collisions), so warp
-        # is the only backend, on the Mac as well as on the H100.
+        # is the only backend, on the Mac as well as on the GPU box.
         impl="warp",
         naconmax=NACONMAX_PER_WORLD * NUM_ENVS,
         njmax=NJMAX,
@@ -92,7 +125,7 @@ def ppo_config(env_config: config_dict.ConfigDict | None = None) -> config_dict.
         # and the PRD wants one every few minutes because the box is preemptible. 150M steps at
         # the M3 rate of 31,449 control-steps/s is about 80 minutes of simulation, so 24 evals
         # is a checkpoint every ~3.5 min. Leap uses 10; the extra 14 cost one eval rollout each
-        # (1024 envs x 400 steps, ~30 s on the H100), which buys back more than it spends the
+        # (1024 envs x 400 steps, ~30 s at the M3 rate), which buys back more than it spends the
         # first time the machine is killed. `train.py --checkpoint-every MIN` re-derives it.
         num_evals=24,
         num_envs=NUM_ENVS,

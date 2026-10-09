@@ -359,7 +359,8 @@ def main() -> None:
         grip=args.grip, twist=args.twist, release=args.release, cycles=args.cycles,
         phase_steps=np.array(phase_steps), grip_z=args.grip_z,
     )
-    print(f"\nsaved {out.relative_to(ROOT)}  ctrl{ctrl.shape} -- replayed by check_parity.py at M2")
+    shown = out.relative_to(ROOT) if out.is_relative_to(ROOT) else out
+    print(f"\nsaved {shown}  ctrl{ctrl.shape} -- replayed by check_parity.py at M2")
 
 
 if __name__ == "__main__":

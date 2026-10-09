@@ -38,7 +38,7 @@ slow = pytest.mark.skipif(
 
 
 def make_env(num_envs: int = 1, **overrides) -> CapTurn:
-    """An env with its contact buffer sized for `num_envs` instead of the H100's 8192."""
+    """An env with its contact buffer sized for `num_envs` instead of the GPU default of 8192."""
     config = capturn_config.default_config()
     config.naconmax = capturn_config.NACONMAX_PER_WORLD * num_envs
     for key, value in overrides.items():
@@ -89,6 +89,70 @@ def test_privileged_state_contains_the_actor_history_verbatim(env):
     assert state.obs["privileged_state"].shape[0] - actor == PRIVILEGED_EXTRA
 
 
+def test_grasp_needs_the_thumb_opposed_to_the_index_not_a_one_sided_push(env):
+    """M5. A bottle-cap grasp is the thumb pad against the *side* of the index finger. The term
+    is a product, so being on the cap is not enough if both surfaces crowd the same side --
+    which is exactly what the first trained policy did: index gripping at 0.3 mm, thumb 20 mm
+    out, contacts 66 deg apart instead of opposed.
+    """
+    import jax.numpy as jp
+
+    k = env._config.reward_config.grasp_sharpness
+    term = lambda thumb, index, opp: float(
+        jp.exp(-k * jp.maximum(thumb, index)) * jp.clip(opp, 0.0, 1.0)
+    )
+    opposed = term(0.0022, 0.0064, +0.78)     # the M1 scripted gait, measured
+    one_sided = term(0.0200, 0.0003, -0.34)   # the flick policy, measured
+    index_only = term(0.0200, 0.0003, +0.78)  # index gripping well, thumb simply absent
+
+    assert opposed > 0.3, "a real lateral pinch must score most of the term"
+    assert one_sided == 0.0, "same-side contacts are not a grasp at any depth"
+    assert opposed > 3 * index_only, "one surface on the cap must not pay like two"
+
+
+def test_grasp_counts_the_whole_index_finger_not_just_the_fingertip(env):
+    """M5. The side of the index finger is a legitimate contact -- a person opens a cap with the
+    edge of the proximal phalanx, not the tip. Narrowing this to fingertips would forbid the
+    very grasp we are asking for."""
+    model = env.mj_model
+    bodies = {model.body(model.geom_bodyid[g]).name for g in env._index_geoms["ids"]}
+    assert {"rh_ffproximal", "rh_ffmiddle", "rh_ffdistal"} <= bodies, (
+        "the whole index finger is a grasp surface, not just the tip"
+    )
+    assert len(env._thumb_geoms["ids"]) > 0
+
+
+def test_losing_the_grasp_terminates_but_only_after_a_regrip_has_time(env):
+    """M5. Two things have to be true at once.
+
+    The flick policy's thumb sat 20-22 mm off the cap -- far inside `drop_distance` (10 cm), so
+    the drop test never fired -- while the index finger pushed the cap one-sidedly. That has to
+    be terminal. But a gait *must* let go to regrip, and terminating on an instantaneous loss
+    would end the M1 scripted gait on 15% of its own steps. Measured on the recordings, the
+    gait's longest release is 3 control steps and the flick hovers for 18 at a time.
+    """
+    import jax.numpy as jp
+
+    cfg = env._config
+    assert cfg.contact_distance < cfg.drop_distance, "this is the tighter of the two tests"
+    assert 3 < cfg.grasp_grace_steps < 18, (
+        "the grace must clear the M1 gait's 3-step release and still catch an 18-step hover"
+    )
+
+    # the counter as `step` runs it: resets to zero the instant the grasp is back
+    def run(lost_pattern):
+        n = jp.zeros((), dtype=jp.int32)
+        fired = False
+        for lost in lost_pattern:
+            n = (n + 1) * bool(lost)
+            fired |= bool(n >= cfg.grasp_grace_steps)
+        return fired
+
+    assert not run([0] * 13 + [1] * 3), "a 3-step regrip must survive"
+    assert run([0] * 5 + [1] * 18), "an 18-step hover must terminate"
+    assert not run([1, 0] * 20), "chattering in and out of contact is not letting go"
+
+
 def test_metrics_cover_every_reward_term_and_the_task_measures(env):
     """The PRD's metric list -- cumulative rotation, mean angular velocity, success flag, each
     reward term -- as names that mean the right thing after Brax's eval aggregation sums them
@@ -104,8 +168,8 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "success",  # the 4*pi crossing -> sums to the success flag
     } <= set(state.metrics)
     assert set(scales) == {
-        "rotate", "reach", "action_rate", "torques", "joint_vel", "success"
-    }, "the PRD's six reward terms"
+        "rotate", "grasp", "action_rate", "torques", "joint_vel", "success"
+    }, "six terms: the PRD's, with `reach` replaced by `grasp` -- NOTES.md, M5"
 
 
 def test_reset_and_step_are_jittable(env):

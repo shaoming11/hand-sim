@@ -1,6 +1,6 @@
 """M5/M7: Brax PPO training for the cap-unscrewing task.
 
-    # the H100, nominal phase (M5)
+    # the H200, nominal phase (M5)
     export XLA_PYTHON_CLIENT_PREALLOCATE=false
     unset MUJOCO_GL                       # EGL is broken on the Daytona image
     tmux new -s train
@@ -318,7 +318,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"jax backend: {jax.default_backend()}   devices: {jax.devices()}")
     if jax.default_backend() != "gpu" and not args.smoke:
-        print("WARNING: no GPU. A real run needs the H100; --smoke is the CPU pipeline check.")
+        print("WARNING: no GPU. A real run needs the H200; --smoke is the CPU pipeline check.")
 
     logdir = pathlib.Path(args.logdir).resolve() / run_name
     ckpt_dir = logdir / "checkpoints"
