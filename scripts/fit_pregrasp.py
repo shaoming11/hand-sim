@@ -72,7 +72,7 @@ IDLE_RADIUS = 0.030  # keep ring/little tips at least this far off the cap axis 
 # against the index finger's 0.1434, and nothing at high flexion. A pose search that *did*
 # enforce opposition found thumb+index squeezes worth 0.1974 N*m from the same two fingers,
 # 2.4x the fitted pregrasp. NOTES.md, M5.
-TIP_OPPOSITION = np.pi  # target azimuthal separation between the two pinch tips [rad]
+TIP_OPPOSITION = 2.60  # target azimuthal separation between the two pinch tips [rad]
 IK_MARGIN = 0.01  # temporary geom margin, so near-contacts are visible to the fitter [m]
 
 

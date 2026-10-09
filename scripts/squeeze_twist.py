@@ -297,10 +297,19 @@ def run(fingers, grip, twist, release, cycles, use_wrist, grip_z=0.0, steps=(4, 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fingers", default="th,ff,mf", help="comma-separated: th,ff,mf,rf,lf")
-    ap.add_argument("--grip", type=float, default=0.25,
+    # M5: thumb+index, not the three-finger tripod. The pregrasp is now fitted for an opposed
+    # two-finger pinch, and on it the middle finger adds almost nothing -- 12.6 deg against
+    # 13.1 at the old gait settings -- because `IDLE_RADIUS` holds it 19.5 mm off the cap.
+    ap.add_argument("--fingers", default="th,ff", help="comma-separated: th,ff,mf,rf,lf")
+    # M5: re-tuned for the opposed pregrasp. Swept over grip x twist x release with the bottle
+    # and penetration constraints enforced: 0.35/0.90/0.008 gives **420.5 deg** in 9.6 s, no
+    # bottle contact, -0.288 mm penetration. That is 7x the three-finger tripod pose's 59.9 deg
+    # from two fingers rather than three. A *lighter* grip wins because the opposed pose already
+    # has the tips bracketing the cap -- winding in harder drives them into the bottle neck
+    # instead of into the cap, and everything at grip >= 0.5 hits the bottle.
+    ap.add_argument("--grip", type=float, default=0.35,
                     help="grip strength: fraction of each flexion joint's remaining travel")
-    ap.add_argument("--twist", type=float, default=0.9, help="azimuth sweep per cycle [rad]")
+    ap.add_argument("--twist", type=float, default=0.90, help="azimuth sweep per cycle [rad]")
     ap.add_argument("--release", type=float, default=0.008, help="back-off radius [m]")
     ap.add_argument("--cycles", type=int, default=12)
     ap.add_argument("--phase-steps", default="4,6,2,4",

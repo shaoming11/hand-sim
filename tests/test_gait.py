@@ -20,6 +20,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 from scripts.squeeze_twist import OpenLoopGait, run  # noqa: E402
 
+# Left at 0.05. Raising it to 0.10 is now *possible* for the first time -- on the opposed
+# pregrasp a lone index finger makes 0.0920 N*m and the thumb+index pinch 0.1837, far enough
+# apart to separate, where the old tripod pose had 0.073 against 0.108 -- and it would close
+# the single-finger strategy every trained policy found. It is not done here because the
+# headroom check below then reads 1.68x instead of the 2.0x it demands, and that margin is a
+# deliberate guard rather than a nuisance. The scripted gait survives it (232 deg in 9.6 s).
+# A spec decision, written up in NOTES.md, M5.
 THREAD_FRICTION = 0.05  # N*m, the cap hinge's frictionloss
 
 

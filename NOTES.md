@@ -1433,6 +1433,63 @@ Two incidental results from the same measurements:
   been reconciled. The comparisons *within* this table are consistent; treat the absolute
   numbers as provisional.
 
+#### Re-fitting the pregrasp for opposition: the scene supports a two-finger gait after all
+
+`fit_pregrasp.py` declared its own `GAIT_TIPS` and so went on fitting a three-finger tripod
+after `capturn.scene` had moved to a two-finger pinch. Its objective asked for three tips spread
+at least 1.75 rad apart, which is exactly the arrangement that puts the thumb where flexion
+carries it past the cap. Every reward tuned in the sections above was asking for a grasp that
+pose made unreachable.
+
+Changed: the tips are imported rather than redeclared, the pairwise separation floor became a
+two-sided opposition target, and `MIN_STANDOFF`'s weight went 5e6 -> 5e8 (with only two radial
+terms the optimiser traded the floor away and started the index 0.18 mm off the cap,
+pre-loaded). `SEED_TIPS` stays a tripod -- seeding is about the hand's orientation plane, not
+about which fingers pinch.
+
+**The opposition target matters more than it looks, and 180 deg is wrong.**
+
+| target | fitted separation | best gait | bottle contact |
+|---|---|---|---|
+| tripod (old) | ~130 deg spread | +59.9 deg | 0 |
+| 180 deg | 180.0 | **+25.9 deg at best, and never clean** | 46-60 steps everywhere |
+| **150 deg** | **150.0** | **+420.5 deg** | **0** |
+
+At 180 deg one finger has to reach across to the far side of the cap, where the bottle neck is,
+and *every* grip/twist/release combination tried hits the bottle. At 150 deg the pinch still
+opposes but both fingers stay on the near hemisphere. The gait that results turns the cap
+**420.5 deg in 9.6 s (43.8 deg/s) with no bottle contact and -0.288 mm of penetration** -- seven
+times the tripod pose, from two fingers instead of three.
+
+A *lighter* grip wins on the opposed pose: 0.35 against the old 0.25-0.50 band, and everything
+at grip >= 0.5 hits the bottle. The tips already bracket the cap, so winding in harder drives
+them into the neck rather than into the cap.
+
+Torque, measured from the new pose:
+
+| | 35% flexion | 50% |
+|---|---|---|
+| middle alone | 0.0392 | 0.0391 |
+| index alone | 0.0647 | 0.0920 |
+| thumb + index | **0.1549** | **0.1837** |
+
+The pinch is now **2x a lone index finger**, where on the tripod pose it was 0.108 against
+0.073 -- too close to tell apart. The thumb has gone from contributing nothing to roughly
+doubling the achievable torque.
+
+**The friction question, now answerable and left open deliberately.** Raising `frictionloss`
+to 0.10 would exclude the single-finger strategy every policy found (index alone 0.0920, middle
+0.0391) while leaving the pinch 1.8x headroom, and the scripted gait survives it comfortably --
+232 deg in 9.6 s, still 24 deg/s against the 12 deg/s a 60 s episode needs. It is **not** applied
+here: `test_hand_can_out_torque_the_thread_friction` demands the grip ceiling exceed 2x the
+thread friction and at 0.10 it reads 1.68x. That margin is a deliberate guard against the task
+being a coin flip, so moving it is a spec decision rather than a tuning one. The option is now
+real, which it was not before -- on the tripod pose there was no setting that excluded a lone
+index finger and left the task solvable.
+
+Not yet retrained. Every policy result above was produced against the tripod pose, so the M5
+numbers are all pre-fix.
+
 ### The Brax/JAX pair does not work out of the box, in two places
 
 Neither is reachable by importing anything. The first fires several minutes into a run, after
