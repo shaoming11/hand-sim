@@ -32,7 +32,9 @@ which needs the contact buffer:
   this wrist range means a wrist twist or a flick.
 * **simultaneous contacts.** How many gaiting tips are inside `--contact-gap` at the same
   instant. `regrips` counts each tip on its own, so it cannot tell one finger working alone
-  from three taking turns; this can. The M1 scripted gait averages 2.25, the flick policy 1.
+  from three taking turns; this can. Over the two pinch fingers the M1 scripted gait averages
+  1.55 of 2 and holds both on the cap 63.5% of the time; the first opposition-trained policy
+  averages 0.67 and manages both only 11.2%.
 * **wrist share of the joint travel.** The wrist has 2 of the 24 joints. If it accounts for
   most of the motion, the fingers are passengers.
 * **deepest penetration.** Measured on the saved trajectories by replaying them through CPU
@@ -368,7 +370,8 @@ def summarize(env: CapTurn, traj: dict[str, np.ndarray], args: argparse.Namespac
     # M5: the number that separates a two-finger grasp from the flick exploit. `regrips` counts
     # each tip's events independently, so one finger working alone and three taking turns can
     # produce similar totals; this counts how many are on the cap *at the same instant*. The M1
-    # scripted gait holds 2.25 cap contacts on average; the flick policy holds one.
+    # scripted gait holds 1.55 of the two pinch fingers on the cap on average, both of them on
+    # 63.5% of frames; the first opposition-trained policy manages 0.67 and 11.2%.
     live_steps = alive > 0
     simultaneous = (traj["gaps"] < args.contact_gap).sum(axis=2)[live_steps]
 
@@ -408,6 +411,7 @@ def summarize(env: CapTurn, traj: dict[str, np.ndarray], args: argparse.Namespac
         },
         "episodes_with_no_regrip": float((regrips.sum(axis=1) == 0).mean()),
         "grasp": grasp_summary(traj, live_steps, env._config),
+        "gait_tip_count": len(scene.GAIT_TIPS),
         "simultaneous_contacts": {
             "median": float(np.median(simultaneous)),
             "mean": float(simultaneous.mean()),
@@ -569,7 +573,7 @@ def main(argv: list[str] | None = None) -> None:
           "(high = turning the cap without gaiting)")
     sim = summary["simultaneous_contacts"]
     print(f"  tips on the cap at once {sim['median']:7.2f}   "
-          f"median (M1 scripted gait 2.25, flick exploit 1)")
+          f"median of {summary['gait_tip_count']} (M1 scripted gait 1.55 mean, both on 63.5%)")
     print(f"  steps with 2+ tips      {sim['frac_steps_multi_contact'] * 100:6.2f}%   "
           f"(steps with none {sim['frac_steps_no_contact'] * 100:.2f}%)")
     g = summary["grasp"]

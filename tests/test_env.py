@@ -29,7 +29,9 @@ from capturn import config as capturn_config  # noqa: E402
 from capturn.env import (  # noqa: E402
     DR_PARAM_SLOTS, FRAME_SIZE, N_ACTUATORS, N_HAND_JOINTS, PRIVILEGED_EXTRA, CapTurn,
 )
-from capturn.scene import ALL_TIPS, GAIT_TIPS, cap_dimensions, surface_distance  # noqa: E402
+from capturn.scene import (  # noqa: E402
+    ALL_TIPS, GAIT_TIPS, IDLE_TIPS, cap_dimensions, surface_distance,
+)
 
 slow = pytest.mark.skipif(
     not os.environ.get("HAND_SIM_SLOW"),
@@ -168,8 +170,9 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "success",  # the 4*pi crossing -> sums to the success flag
     } <= set(state.metrics)
     assert set(scales) == {
-        "rotate", "grasp", "action_rate", "torques", "joint_vel", "success"
-    }, "six terms: the PRD's, with `reach` replaced by `grasp` -- NOTES.md, M5"
+        "rotate", "grasp", "idle_contact", "action_rate", "torques", "joint_vel", "success"
+    }, ("seven terms: the PRD's, with `reach` replaced by `grasp` and `idle_contact` added to "
+        "keep the middle finger off the cap -- NOTES.md, M5")
 
 
 def test_reset_and_step_are_jittable(env):
@@ -241,7 +244,10 @@ def test_surface_distance_measures_the_cap_wall(env):
 
 def test_the_scene_has_a_sensor_for_every_fingertip(env):
     model = env.mj_model
-    assert len(GAIT_TIPS) == 3 and len(ALL_TIPS) == 5
+    # M5: two fingers gait, not three. The middle finger moved to IDLE_TIPS, and ALL_TIPS keeps
+    # its five entries in their original order so the privileged observation layout is unchanged.
+    assert len(GAIT_TIPS) == 2 and len(IDLE_TIPS) == 3 and len(ALL_TIPS) == 5
+    assert ALL_TIPS == GAIT_TIPS + IDLE_TIPS
     for tip in ALL_TIPS:
         model.site(tip)  # raises if missing
         short = tip.removeprefix("rh_").removesuffix("_tip")

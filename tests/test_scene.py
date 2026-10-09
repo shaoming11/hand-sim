@@ -133,7 +133,12 @@ def test_gaiting_fingertips_reach_the_cap(scene):
 
 
 def test_gaiting_fingertips_are_spread_around_the_cap(scene):
-    """Three tips bunched on one side cannot produce a twisting couple."""
+    """Tips bunched on one side cannot produce a twisting couple.
+
+    M5: `GAIT_TIPS` is the thumb and index finger now, so this is the pregrasp pose's
+    opposition check -- the two pinch surfaces must start on opposite sides of the cap. The
+    bar is unchanged and the loop is written for however many tips gait.
+    """
     model, data = scene
     cap_mat = data.site("cap_site").xmat.reshape(3, 3)
     az = []
@@ -142,8 +147,8 @@ def test_gaiting_fingertips_are_spread_around_the_cap(scene):
         az.append(np.arctan2(local[1], local[0]))
     seps = [
         abs(np.arctan2(np.sin(az[i] - az[j]), np.cos(az[i] - az[j])))
-        for i in range(3)
-        for j in range(i + 1, 3)
+        for i in range(len(az))
+        for j in range(i + 1, len(az))
     ]
     assert min(seps) > np.radians(80.0), f"tip separations {np.degrees(seps).round(1)} deg"
 

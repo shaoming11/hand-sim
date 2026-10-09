@@ -158,7 +158,9 @@ No cap angle in the actor. The cap is rotationally symmetric, so the policy does
 | joint velocity | `-sum(qvel_hand^2)` | 1e-4 |
 | success | one-time bonus when cumulative rotation passes `4*pi` | 10.0 |
 
-**Termination.** NaN in qpos or qvel. All three gaiting fingertips more than 10 cm from the cap. Otherwise fixed length.
+**Termination.** NaN in qpos or qvel. All gaiting fingertips more than 10 cm from the cap, or the grasp lost for `grasp_grace_steps` consecutive steps. Otherwise fixed length.
+
+**M5 revision: the gait is two-fingered.** This file specified three gaiting fingertips (thumb, index, middle) throughout. It is now the thumb and index finger only -- a lateral pinch, which is how a person unscrews a cap. The middle, ring and little fingers are costed for touching the cap (`reward_config.scales.idle_contact`) rather than merely unrewarded. The measurement that forced it: on the M1 scripted gait the middle finger is in contact on 93.8% of frames against the index's 64.6%, and the first policy trained against the opposition reward leaned on the middle finger hardest of all (71.3% of steps) while leaving the thumb pad 12.15 mm off the cap. Both are legitimate three-finger grasps and neither is the one this task is for. See NOTES.md, M5.
 
 **Reset.** `pregrasp` keyframe plus uniform noise on hand joints (about ±0.05 rad, clipped to limits) and a random cap angle.
 

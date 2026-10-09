@@ -245,6 +245,7 @@ class CapTurn(mjx_env.MjxEnv):
         metrics["thumb_gap_per_step"] = jp.zeros(())
         metrics["index_gap_per_step"] = jp.zeros(())
         metrics["opposition_per_step"] = jp.zeros(())
+        metrics["idle_contact_per_step"] = jp.zeros(())
 
         obs = self._get_obs(data, info, jp.zeros(self._config.history_len * FRAME_SIZE))
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
@@ -306,6 +307,7 @@ class CapTurn(mjx_env.MjxEnv):
         state.metrics["thumb_gap_per_step"] = thumb_gap
         state.metrics["index_gap_per_step"] = index_gap
         state.metrics["opposition_per_step"] = opposition
+        state.metrics["idle_contact_per_step"] = terms["idle_contact"]
 
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
 
@@ -386,6 +388,15 @@ class CapTurn(mjx_env.MjxEnv):
                        * jp.maximum(thumb_gap, index_gap))
                 * (0.5 * (1.0 + opposition))
             ),
+            # M5: the other half of "a two-finger pinch". `grasp` says what must be on the cap;
+            # this says what must be off it. Same exponential as `grasp` so the two are on one
+            # scale: 1.0 per finger at contact, 0.37 at 10 mm, 0.05 at 30 mm, where the ring and
+            # little fingers already sit and so pay nothing. Clipped at zero from below so that
+            # penetrating the cap cannot score better than resting on it.
+            "idle_contact": jp.sum(jp.exp(
+                -self._config.reward_config.grasp_sharpness
+                * jp.maximum(self.idle_tip_gaps(data), 0.0)
+            )),
             "action_rate": jp.sum(jp.square(action - info["last_act"])),
             "torques": jp.sum(jp.square(data.actuator_force)),
             "joint_vel": jp.sum(jp.square(data.qvel[self._hand_dqids])),
@@ -449,8 +460,20 @@ class CapTurn(mjx_env.MjxEnv):
         index_gap, index_dir = closest(self._index_geoms)
         return thumb_gap, index_gap, -jp.dot(thumb_dir, index_dir)
 
+    def idle_tip_gaps(self, data: mjx.Array) -> jax.Array:
+        """Gap from each *non*-gaiting fingertip to the cap surface, (3,).
+
+        Middle, ring and little. These are the fingers a two-finger pinch must keep off the
+        cap, and `reward_config.scales.idle_contact` is what costs them for being on it.
+        """
+        return scene.surface_distance(
+            self._tip_positions(data, scene.IDLE_TIP_SENSORS),
+            self._cap_radius,
+            self._cap_half_height,
+        )
+
     def tip_gaps(self, data: mjx.Data) -> jax.Array:
-        """Gap from each gaiting fingertip to the cap surface, (3,).
+        """Gap from each gaiting fingertip to the cap surface, (2,).
 
         Public because `scripts/eval.py` reads it to tell gaiting from a static grip.
         """

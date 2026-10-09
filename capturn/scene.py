@@ -16,14 +16,24 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCENE = ROOT / "assets" / "scene.xml"
 
-# The three fingers that gait. M1 established that these are the ones that can reach around the
-# cap and turn it; the ring and little fingers are observed by the critic but do not gait.
-GAIT_TIPS = ("rh_th_tip", "rh_ff_tip", "rh_mf_tip")
-ALL_TIPS = GAIT_TIPS + ("rh_rf_tip", "rh_lf_tip")
+# M5: the two fingers that form the pinch. A person unscrews a bottle cap with the thumb pad
+# opposed to the side of the index finger, and that is the grasp this task is for. The middle
+# finger was a gaiting finger through M4 and is not one now: on the M1 scripted gait it is in
+# contact 93.8% of frames, *more* than the index at 64.6%, and the first policy trained with the
+# opposition reward leaned on it hardest of all (71.3% of steps, against the thumb tip's 17.7%).
+# Demoting it is what makes the two-finger pinch the only way to score. The ring and little
+# fingers never reach the cap at all -- 36 and 42 mm at the closest.
+GAIT_TIPS = ("rh_th_tip", "rh_ff_tip")
+# The fingers that must stay *off* the cap, costed in the reward.
+IDLE_TIPS = ("rh_mf_tip", "rh_rf_tip", "rh_lf_tip")
+# Order is deliberately unchanged -- thumb, index, middle, ring, little -- so the privileged
+# observation keeps the byte-identical layout M4 fixed. Only the partition moved.
+ALL_TIPS = GAIT_TIPS + IDLE_TIPS
 
 # `framepos` sensors on these, relative to `cap_site`, i.e. already in the cap frame.
-GAIT_TIP_SENSORS = ("th_tip_position", "ff_tip_position", "mf_tip_position")
-ALL_TIP_SENSORS = GAIT_TIP_SENSORS + ("rf_tip_position", "lf_tip_position")
+GAIT_TIP_SENSORS = ("th_tip_position", "ff_tip_position")
+IDLE_TIP_SENSORS = ("mf_tip_position", "rf_tip_position", "lf_tip_position")
+ALL_TIP_SENSORS = GAIT_TIP_SENSORS + IDLE_TIP_SENSORS
 
 CAP_JOINT = "cap_hinge"
 
@@ -32,7 +42,13 @@ CAP_JOINT = "cap_hinge"
 # half of this right by itself: it drove the cap with `rh_ffmiddle` and `rh_ffproximal`, the
 # correct surfaces, but never brought the thumb in, so its contacts sat 66 deg apart instead of
 # opposed and the grip was a one-sided push. Contact anywhere on these bodies counts.
-THUMB_BODIES = ("rh_thdistal", "rh_thmiddle")
+# M5: the distal segment only -- the pad. It was `("rh_thdistal", "rh_thmiddle")`, contact
+# anywhere along the thumb, and the policy took the loophole: it pressed with the middle phalanx
+# and left the pad 12.15 mm off the cap, touching on 17.7% of steps against the M1 gait's 1.19 mm
+# and 90.6%. The body-level gap read 1.87 mm and looked healthy while the thumb was not really
+# gripping. The index stays full-length on purpose: a lateral pinch opposes the thumb pad to the
+# *side* of the index finger, so its proximal and middle segments are legitimate contact.
+THUMB_BODIES = ("rh_thdistal",)
 INDEX_BODIES = ("rh_ffdistal", "rh_ffmiddle", "rh_ffproximal")
 # Samples along each capsule's axis. The closest point on a finger segment is usually not an
 # endpoint, and 5 is enough to find it to well under a millimetre on a 25 mm capsule.

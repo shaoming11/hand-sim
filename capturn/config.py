@@ -96,6 +96,13 @@ def default_config() -> config_dict.ConfigDict:
                 # succeeding. With the sharper, opposition-gated term and this weight, parking
                 # returns ~1.2 against ~14 for succeeding.
                 grasp=0.15,
+                # M5: the cost that makes the pinch two-fingered. `grasp` says what must touch
+                # the cap; without this nothing says what must not, and `rotate` quietly pays
+                # the middle finger to help turn it. Scaled so that all three idle tips in full
+                # contact (3 x 1.0) exactly cancels a perfect grasp (1.0 x 0.15), which makes
+                # recruiting a fourth finger worthless rather than merely discouraged. A first
+                # setting, not a tuned one.
+                idle_contact=-0.05,
                 action_rate=-0.01,
                 torques=-1e-3,
                 joint_vel=-1e-4,
