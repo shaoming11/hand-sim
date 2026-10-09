@@ -1,0 +1,70 @@
+{
+  "episodes": 256,
+  "success_rate": 0.0,
+  "success_stderr": 0.0,
+  "success_threshold_deg": 720.0,
+  "net_rotation_deg": {
+    "mean": 499.7741394042969,
+    "median": 501.3792724609375,
+    "p10": 473.9662780761719,
+    "p90": 523.9268798828125
+  },
+  "gross_rotation_deg_mean": 499.7765197753906,
+  "net_over_gross": 0.9999951720237732,
+  "mean_angvel_deg_s": 63.20969772338867,
+  "drop_rate": 1.0,
+  "mean_episode_steps": 131.984375,
+  "regrips_per_episode": {
+    "rh_th_tip": 0.0,
+    "rh_ff_tip": 0.0
+  },
+  "episodes_with_no_regrip": 1.0,
+  "grasp": {
+    "thumb_gap_mm": {
+      "median": 1.6986504197120667,
+      "p90": 15.552409924566746
+    },
+    "index_gap_mm": {
+      "median": 15.27605950832367,
+      "p90": 18.294917419552803
+    },
+    "opposition": {
+      "median": -0.5844365358352661,
+      "frac_opposed": 0.2787380134959157
+    },
+    "frac_steps_both_within_contact_distance": 0.9393867645317864,
+    "contact_distance_mm": 20.0,
+    "grasp_term_median": 0.033081114292144775
+  },
+  "gait_tip_count": 2,
+  "simultaneous_contacts": {
+    "median": 1.0,
+    "mean": 1.1226766899490943,
+    "frac_steps_multi_contact": 0.26695868355629215,
+    "frac_steps_no_contact": 0.14428199360719782
+  },
+  "wrist_share_of_travel": 0.04639776423573494,
+  "wrist_joint_count": 2,
+  "hand_joint_count": 24,
+  "action_chatter": 0.02153972163796425,
+  "overflow_flags": [],
+  "gap_thresholds": {
+    "contact_gap_m": 0.01,
+    "release_gap_m": 0.02,
+    "median_gap_m": 0.006172923371195793
+  },
+  "checkpoint": "/workspace/hand-sim/logs/capturn-2f-s2/checkpoints/from000000000000/000044236800",
+  "step": 44236800,
+  "dr_scale": 0.0,
+  "deterministic": true,
+  "saved": [
+    "/workspace/hand-sim/artifacts/twofinger_s2_ep00.npz",
+    "/workspace/hand-sim/artifacts/twofinger_s2_ep01.npz"
+  ],
+  "saved_net_rotation_deg": [
+    531.1537475585938,
+    526.4811401367188
+  ],
+  "worst_penetration_mm": -0.14499427978616197,
+  "reset_penetration_mm": -2.515340493094055
+}

@@ -1,0 +1,73 @@
+######## TRAIN seed 1 ########
+           0   reward   +0.022   success   0.0%   net     +0.1 deg   net/gross +0.71
+   2,949,120   reward   +1.036   success   0.0%   net   +157.5 deg   net/gross +1.00
+   5,898,240   reward   +2.053   success   0.0%   net   +319.1 deg   net/gross +1.00
+   8,847,360   reward   +2.838   success   0.0%   net   +439.0 deg   net/gross +1.00
+  11,796,480   reward   +3.925   success   0.0%   net   +464.2 deg   net/gross +1.00
+  14,745,600   reward   +8.061   success  99.4%   net   +924.3 deg   net/gross +1.00
+  17,694,720   reward  +16.624   success 100.0%   net  +3166.3 deg   net/gross +1.00
+  20,643,840   reward  +19.207   success 100.0%   net  +4106.0 deg   net/gross +1.00
+  23,592,960   reward  +20.262   success 100.0%   net  +4720.7 deg   net/gross +1.00
+  26,542,080   reward  +20.265   success 100.0%   net  +5226.0 deg   net/gross +1.00
+  29,491,200   reward   +8.984   success 100.0%   net  +1694.6 deg   net/gross +1.00
+  32,440,320   reward  +20.331   success 100.0%   net  +5320.7 deg   net/gross +1.00
+  35,389,440   reward  +20.418   success 100.0%   net  +5709.8 deg   net/gross +1.00
+  38,338,560   reward  +20.600   success 100.0%   net  +5939.1 deg   net/gross +1.00
+  41,287,680   reward  +20.687   success 100.0%   net  +6234.7 deg   net/gross +1.00
+  44,236,800   reward  +20.800   success 100.0%   net  +6179.9 deg   net/gross +1.00
+######## EVAL seed 1 ########
+success rate      100.00% +- 0.00  (256/256 episodes reached 720 deg)
+net rotation      mean  +6180.2 deg   median  +6177.9   p10  +6146.2   p90  +6215.6
+mean angvel        +289.97 deg/s
+  regrips, rh_th_tip         0.00 per episode
+  regrips, rh_ff_tip         7.00 per episode
+  tips on the cap at once    0.00   median of 2 (M1 scripted gait 1.55 mean, both on 63.5%)
+  steps with 2+ tips        3.24%   (steps with none 64.36%)
+  thumb gap                 8.24 mm median   (p90 16.89)
+  index gap                 4.95 mm median   (p90 16.60)
+  opposition              -0.274 median   opposed on 30.6% of steps (+1 = opposite sides, -1 = same side)
+  both within 20 mm         99.41% of steps   (the grasp-loss termination threshold)
+  grasp reward term        0.110 median   (0 = the grasp term is paying nothing)
+  wrist share of travel     8.09%   (2 of 24 joints)
+  action chatter           0.0744 per step
+  deepest penetration      -0.268 mm   (M1 open-loop: -0.566 CPU, -0.104 warp)
+  reset-pose penetration   -1.675 mm   (frame 0, from reset_noise -- not the policy's doing)
+  warp overflow           EPA_HORIZON
+######## SEED 1 DONE ########
+######## TRAIN seed 2 ########
+           0   reward   +0.054   success   0.0%   net     +0.1 deg   net/gross +0.96
+   2,949,120   reward   +1.314   success   0.0%   net   +126.7 deg   net/gross +0.81
+   5,898,240   reward   +2.279   success   0.0%   net   +342.3 deg   net/gross +1.00
+   8,847,360   reward   +2.936   success   0.0%   net   +372.3 deg   net/gross +1.00
+  11,796,480   reward   +3.413   success   0.0%   net   +383.3 deg   net/gross +1.00
+  14,745,600   reward   +4.036   success   0.0%   net   +429.9 deg   net/gross +1.00
+  17,694,720   reward   +4.473   success   0.0%   net   +476.0 deg   net/gross +1.00
+  20,643,840   reward   +4.945   success   0.0%   net   +488.1 deg   net/gross +1.00
+  23,592,960   reward   +4.654   success   0.0%   net   +486.6 deg   net/gross +1.00
+  26,542,080   reward   +5.281   success   0.0%   net   +483.2 deg   net/gross +1.00
+  29,491,200   reward   +5.508   success   0.0%   net   +485.2 deg   net/gross +1.00
+  32,440,320   reward   +5.465   success   0.0%   net   +490.9 deg   net/gross +1.00
+  35,389,440   reward   +5.239   success   0.0%   net   +481.1 deg   net/gross +1.00
+  38,338,560   reward   +5.366   success   0.0%   net   +488.2 deg   net/gross +1.00
+  41,287,680   reward   +5.991   success   0.0%   net   +485.9 deg   net/gross +1.00
+  44,236,800   reward   +6.124   success   0.0%   net   +498.9 deg   net/gross +1.00
+######## EVAL seed 2 ########
+success rate        0.00% +- 0.00  (0/256 episodes reached 720 deg)
+net rotation      mean   +499.8 deg   median   +501.4   p10   +474.0   p90   +523.9
+mean angvel         +63.21 deg/s
+  regrips, rh_th_tip         0.00 per episode
+  regrips, rh_ff_tip         0.00 per episode
+  tips on the cap at once    1.00   median of 2 (M1 scripted gait 1.55 mean, both on 63.5%)
+  steps with 2+ tips       26.70%   (steps with none 14.43%)
+  thumb gap                 1.70 mm median   (p90 15.55)
+  index gap                15.28 mm median   (p90 18.29)
+  opposition              -0.584 median   opposed on 27.9% of steps (+1 = opposite sides, -1 = same side)
+  both within 20 mm         93.94% of steps   (the grasp-loss termination threshold)
+  grasp reward term        0.033 median   (0 = the grasp term is paying nothing)
+  wrist share of travel     4.64%   (2 of 24 joints)
+  action chatter           0.0215 per step
+  deepest penetration      -0.145 mm   (M1 open-loop: -0.566 CPU, -0.104 warp)
+  reset-pose penetration   -2.515 mm   (frame 0, from reset_noise -- not the policy's doing)
+  warp overflow           none
+######## SEED 2 DONE ########
+######## ALL_DONE ########

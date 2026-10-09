@@ -28,7 +28,15 @@ too. Penetration rises to -0.781 mm and `EPA_HORIZON` returns, both from making 
 Across seeds it is **not yet reliable**: seed 1 reaches +0.600 opposition with all three
 fingertips regripping and contact lost on only 9% of steps, while seed 2 falls back to -0.463
 and a 9.6 mm index gap. Both score 100% on criterion 1. Two seeds; the third was lost to a
-preemption. Details in [`NOTES.md`](NOTES.md), M5.
+preemption.
+
+**The two-finger pinch (thumb and index only) is implemented and is currently a regression**:
+of two seeds, one fails the task outright (0% success) and the other succeeds with a worse
+grasp than the three-finger config. The cause is measured -- the `idle_contact` cost penalises
+how *close* the unused fingers are rather than whether they are helping, and its tail is wide
+enough (0.368 at 10 mm) that the only way to satisfy it is to lift the whole hand off the cap.
+It would also penalise the M1 reference gait by -5.3 of return. Details in
+[`NOTES.md`](NOTES.md), M5.
 
 ## Setup (Mac, CPU)
 

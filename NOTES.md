@@ -1274,6 +1274,51 @@ second time a reported number has been computed differently from the thing it cl
 measure (the first was reset-pose penetration), both in code written to check the reward rather
 than in the reward itself.
 
+#### The two-finger pinch, as first implemented, is a regression
+
+The grasp was narrowed to thumb and index (`GAIT_TIPS`), the thumb to its pad
+(`THUMB_BODIES = ("rh_thdistal",)`), and an `idle_contact` cost added at -0.05 to keep the
+middle, ring and little fingers off the cap. Two seeds, 40M each, same budget as before:
+
+| | 3-finger, seed 1 | **2-finger, seed 1** | **2-finger, seed 2** |
+|---|---|---|---|
+| success rate | 100% | 100% | **0%** |
+| net rotation | +4,650 deg | +6,180 deg | +500 deg (below the 720 bar) |
+| opposition | +0.594 | **-0.274** | **-0.584** |
+| thumb / index gap | 1.87 / 0.16 mm | 8.24 / 4.95 mm | 1.70 / **15.28 mm** |
+| both pinch tips on cap | 11.0% of steps | **3.2%** | 26.7% |
+| mean angular velocity | 208 deg/s | 290 deg/s | 63 deg/s |
+
+**One seed fails the task outright and the other succeeds with a worse grasp than the
+three-finger config it replaced.** Not a tuning miss -- the change made things worse on both
+axes at once.
+
+**Why: `idle_contact` costs proximity, not participation.** It is
+`exp(-100 * gap)` per idle tip, which is 0.368 at 10 mm and 0.135 at 20 mm and only reaches
+zero around 34 mm. A middle finger parked 20 mm away is not gripping anything and still pays.
+And the hand cannot satisfy it locally: the index and middle are adjacent, so pushing the
+middle out to 34 mm takes the index with it. Measured on the resulting policy, every gap rose
+together -- thumb 12.15 -> 18.98 mm, index 10.16 -> **35.23** mm, middle 4.86 -> 33.75 mm. The
+cheapest way to stop paying the cost is to take the whole hand off the cap, so that is what
+both seeds did, and seed 1 then went back to striking the cap at 290 deg/s.
+
+**The clinching check: this reward punishes the reference gait.** Scored against the M1
+scripted `squeeze_twist` trajectory, `idle_contact` costs **-5.3 of return over the episode**,
+because its middle finger is in contact on 93.8% of frames. A term that penalises the
+best-looking behaviour in the project is measuring the wrong thing.
+
+The *intent* is not disproven -- nothing here says a thumb-and-index pinch is unlearnable. What
+is disproven is costing idle fingers by distance. Worth trying next, in order:
+
+* **Make the cost bite only on real contact.** The same exponential at sharpness 500-1000 is
+  0.37 at 2 mm and essentially zero by 10 mm, so a finger that is merely nearby pays nothing
+  and only one actually touching does. Cheapest change, keeps the gradient.
+* **Cost contact force on the idle geoms** rather than a site distance. Physically what is
+  meant, and immune to the adjacency problem, at the price of reading contacts in the reward.
+* **Re-check `THUMB_BODIES`.** Narrowing to the pad is right in principle, but it was changed
+  in the same run as `idle_contact`, so its own effect is unmeasured. Seed 2 held the thumb at
+  1.70 mm and still failed, which suggests the pad is reachable and the index is the problem.
+
 ### The Brax/JAX pair does not work out of the box, in two places
 
 Neither is reachable by importing anything. The first fires several minutes into a run, after
