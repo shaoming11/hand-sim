@@ -1370,6 +1370,69 @@ from one 8 mm away, which the tip-site distance cannot do well. Reading contact 
 idle geoms -- the second option listed above, skipped as the more expensive one -- is now the
 one worth doing.
 
+#### The scene cannot produce a thumb-index pinch, which is why no reward could
+
+Measured on CPU from the `pregrasp` keyframe, ramping each finger group's actuators toward
+their limits and summing the normal force on the cap. Torque ceiling is `mu * r * sum(Fn)` with
+`mu = 1.0`, `r = 0.016`, against the hinge's `frictionloss = 0.05` N*m:
+
+| group | 35% flexion | 50% | 80% |
+|---|---|---|---|
+| thumb (all 5 joints) | 0.0249 | 0.0334 | **0.0000** |
+| index (all 3 joints) | 0.0429 | 0.0727 | 0.1434 |
+| middle alone | 0.0272 | 0.0337 | — |
+| thumb + index | 0.0710 | 0.1084 | **0.1429** |
+
+**The index finger alone beats the thread friction; the thumb never does.** And at 80% flexion
+thumb+index (0.1429) is indistinguishable from index alone (0.1434) -- the thumb contributes
+*nothing*. Its own ceiling is 0.0334 N*m, two thirds of what the cap needs, and it falls to zero
+when flexed hard.
+
+The reason is kinematic, not a force limit. Tracking the thumb tip as it flexes:
+
+| flexion | thumb gap | azimuth from the index |
+|---|---|---|
+| 20% | **1.54 mm** | 158 deg |
+| 35% | 4.33 mm | 163 deg |
+| 50% | 11.19 mm | **178 deg** |
+| 65% | 47.18 mm | 51 deg |
+| 80% | 56.22 mm | 47 deg |
+
+**The thumb cannot be opposed and in contact at the same time.** Where it is properly opposed
+(178 deg, 50% flexion) it is already 11 mm off the cap; where it touches (1.54 mm, 20% flexion)
+it is 20 deg short of opposed and pressing with about 1 N. Past 50% it sweeps off the cap
+entirely. The pregrasp pose puts the thumb where flexion carries it *past* the cap rather than
+into it.
+
+This explains every M5 result at once, and it is not a reward-shaping problem:
+
+* The index finger does all the work in every trained policy because it is the only finger that
+  can beat 0.05 N*m on its own.
+* The thumb sits at 12-13 mm in those policies because that is the posture that trades least
+  against the rest of the grasp -- not because the reward failed to ask for better.
+* `opposition` and `thumb_gap` pull against each other by construction, so the `grasp` term was
+  asking for a configuration the hand cannot reach. Fixing its gradient (sharpening, reshaping)
+  moved the number without being able to move the physics.
+* Raising `frictionloss` to exclude a lone index finger would need ~0.075 N*m, against a
+  thumb+index ceiling of 0.083 at 50% flexion -- an 11% margin, and the M1 scripted gait already
+  collapses at 0.08 (+59.89 deg -> +4.53 deg). There is no friction setting that excludes the
+  index finger alone and still leaves the task solvable.
+
+**What would have to change is geometry**, in M0/M1 territory: the hand's placement relative to
+the cap, or the `pregrasp` keyframe's thumb abduction (`THJ5`/`THJ4`), so that the thumb's
+contact window and its opposition window overlap. Until they do, "a two-finger pinch" is not
+available to any policy at any reward.
+
+Two incidental results from the same measurements:
+
+* **The fingertip hull simplification costs the pinch nothing.** Thumb+index at 35% flexion is
+  3.19 N with `maxhullvert=16` and 3.20 N with full hulls. It does cost the whole-hand grip
+  about 20% (4.77 N against 5.94 N), from the fingers that are not doing the pinching.
+* **These absolute forces disagree with M1's** (4.77 N here against 9.79 N at 35% flexion in the
+  torque-headroom table above). Same quantity, different ramp procedure, and the two have not
+  been reconciled. The comparisons *within* this table are consistent; treat the absolute
+  numbers as provisional.
+
 ### The Brax/JAX pair does not work out of the box, in two places
 
 Neither is reachable by importing anything. The first fires several minutes into a run, after

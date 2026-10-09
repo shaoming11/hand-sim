@@ -209,7 +209,10 @@ def test_action_delay_buffer_is_sized_whether_or_not_delay_is_enabled():
 def test_buffer_sizing_matches_the_measured_counts():
     assert capturn_config.NACONMAX_PER_WORLD == 44  # M2, ncollision with 2x headroom
     assert capturn_config.NJMAX == 150
-    assert capturn_config.NUM_ENVS == 8192  # M3: 16384 fails to allocate
+    # M3: 16384 allocates fine on an H200/Blackwell in a fresh process, it is just 4.6% slower
+    # (30,856 vs 32,358 control-steps/s). The H100's allocation failure was the single-process
+    # JAX/Warp starvation mode, not a ceiling. 8192 wins on throughput. NOTES.md, M3.
+    assert capturn_config.NUM_ENVS == 8192
     assert capturn_config.default_config().naconmax == 44 * 8192, "naconmax is a total"
 
 
@@ -217,7 +220,9 @@ def test_ppo_config_asks_for_asymmetric_actor_critic():
     ppo = capturn_config.ppo_config()
     assert ppo.network_factory.policy_obs_key == "state"
     assert ppo.network_factory.value_obs_key == "privileged_state"
-    assert ppo.episode_length == 400
+    # The invariant is that PPO is told the same episode length the env enforces, not any
+    # particular number -- M5 moved it from 400 to 1200 so a deliberate gait can clear 4*pi.
+    assert ppo.episode_length == capturn_config.default_config().episode_length == 1200
     assert ppo.full_reset, "see NOTES.md M4: info and reset randomisation both depend on this"
 
 

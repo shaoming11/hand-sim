@@ -35,7 +35,14 @@ def default_config() -> config_dict.ConfigDict:
         # M2: the PRD's 0.005 is not converged -- the contact solref timeconst is exactly one
         # step long there, which inflates cap rotation by 48%. 40 substeps, 2.31x the cost.
         sim_dt=0.00125,
-        episode_length=400,  # 20 s
+        # M5: 400 steps (20 s) demanded 36 deg/s to clear 4*pi, which is 5.8x the M1 scripted
+        # gait's 6.2 deg/s -- the hand-authored reference could not have passed its own task, and
+        # every trained policy answered by spinning the cap at 150-290 deg/s, far past
+        # `rotate_clip` where the reward stops paying. 1200 steps (60 s) asks 12 deg/s, about 2x
+        # the scripted gait, which leaves room for a deliberate regripping gait to succeed. The
+        # step budget per run is unchanged, so this costs no wall-clock; it buys fewer episodes
+        # per unit of experience.
+        episode_length=1200,  # 60 s
         action_repeat=1,
         # Delta position targets: target <- clip(target + action_scale * a, ctrlrange).
         action_scale=0.1,  # rad per control step
