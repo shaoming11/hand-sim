@@ -1231,6 +1231,49 @@ Single seed, 40M steps, one configuration. The next thing worth doing is equal-b
 multi-seed runs before any of this is called a result, and only then deciding whether the
 remaining gap to 2.25 simultaneous contacts matters.
 
+#### Multi-seed: the opposed grip is seed-dependent, not reliable
+
+Equal-budget seeds at 40M with the reshaped gate. The box was preempted during seed 3, so this
+is **two seeds, not three**. Seed 1 was additionally run twice, on different boxes at 41.3M and
+44.2M steps, and landed in the same place both times -- so the split below is across-seed
+behaviour, not evaluation noise.
+
+| | seed 1 (44.2M) | seed 1 (41.3M, earlier box) | **seed 2 (44.2M)** |
+|---|---|---|---|
+| success rate | 100% | 100% | 100% |
+| **opposition, median** | **+0.600** | **+0.794** | **-0.463** |
+| steps opposed | 81.8% | 75.2% | **35.7%** |
+| thumb / index gap | 1.87 / 0.18 mm | 2.92 / 0.30 mm | **5.23 / 9.57 mm** |
+| regrips th / ff / mf | 7 / 7 / 7 | 0 / 7 / 7 | 4 / 4 / 4 |
+| steps with 2+ tips | **44.2%** | 30.3% | 22.8% |
+| steps with no tip contact | **9.2%** | 31.2% | 43.1% |
+| net rotation | +4,650 deg | +4,493 deg | +2,952 deg |
+| warp overflow | none | EPA_HORIZON | ITERATIONS |
+
+**Both seeds score 100% on criterion 1 and land in different worlds on criterion 2.** Seed 1 is
+the best grasp seen in this project: all three fingertips regripping evenly, two or more on the
+cap 44% of the time, contact lost on only 9% of steps, an index finger 0.18 mm off the surface,
+and no warp overflow at all. Seed 2 is most of the way back to the one-sided hover -- opposition
+negative at the median, the index finger 9.6 mm off, and nearly half of all steps with no tip
+contact.
+
+So reshaping the gate **makes the opposed grip reachable, not inevitable**. The dead gradient is
+genuinely fixed -- seed 2 is not stuck at zero signal the way every pre-reshape run was, and it
+does reach 35.7% opposed steps against the old 1.6% -- but the reward still admits both
+solutions and which one a run finds depends on initialisation. That is a reward-shaping result,
+not a tuning one, and it is the thing to chase next: `rotate` at weight 1.0 against `grasp` at
+0.15 still pays more for turning the cap badly than for holding it well.
+
+**A measurement bug found while reading these, and fixed.** `grasp_summary` computed the term
+with `np.clip(opposition, 0, 1)` -- the *old* gate -- so after the reward was reshaped it
+understated the term wherever opposition was negative, reporting 0.000 for seed 2 where the
+real value is about 0.103. The gap and opposition columns above are unaffected and are what the
+reading rests on; the grasp-term figures from this sweep are not trustworthy and are left out.
+`eval.py` now mirrors the reward, with a comment that the two must change together. This is the
+second time a reported number has been computed differently from the thing it claimed to
+measure (the first was reset-pose penetration), both in code written to check the reward rather
+than in the reward itself.
+
 ### The Brax/JAX pair does not work out of the box, in two places
 
 Neither is reachable by importing anything. The first fires several minutes into a run, after

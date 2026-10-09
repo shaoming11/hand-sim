@@ -25,7 +25,10 @@ could not teach the grip it asks for. **Reshaping that one factor to `0.5 * (1 +
 fixes it**: opposition goes -0.627 -> **+0.794** (opposed on 75% of steps), the grasp term
 0.000 -> **0.550**, and the gaps collapse 9.8/12.2 mm -> **2.9/0.3 mm**, so the hover is gone
 too. Penetration rises to -0.781 mm and `EPA_HORIZON` returns, both from making real contact.
-Single seed. Details in [`NOTES.md`](NOTES.md), M5.
+Across seeds it is **not yet reliable**: seed 1 reaches +0.600 opposition with all three
+fingertips regripping and contact lost on only 9% of steps, while seed 2 falls back to -0.463
+and a 9.6 mm index gap. Both score 100% on criterion 1. Two seeds; the third was lost to a
+preemption. Details in [`NOTES.md`](NOTES.md), M5.
 
 ## Setup (Mac, CPU)
 

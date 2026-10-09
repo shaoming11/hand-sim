@@ -306,7 +306,11 @@ def grasp_summary(traj: dict[str, np.ndarray], live: np.ndarray, env_config) -> 
     worst = np.maximum(thumb, index)
     contact = float(env_config.contact_distance)
     sharpness = float(env_config.reward_config.grasp_sharpness)
-    term = np.exp(-sharpness * worst) * np.clip(opposition, 0.0, 1.0)
+    # Mirrors `CapTurn._get_reward`'s `grasp` term and must be changed with it. It is NOT
+    # `clip(opposition, 0, 1)` any more: that gate is what made the term inert, and reporting
+    # the clipped form against the reshaped reward understates it wherever opposition is
+    # negative -- which is exactly the regime worth reading. NOTES.md, M5.
+    term = np.exp(-sharpness * worst) * (0.5 * (1.0 + opposition))
     return {
         "thumb_gap_mm": {"median": float(np.median(thumb)) * 1e3,
                          "p90": float(np.percentile(thumb, 90)) * 1e3},
