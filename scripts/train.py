@@ -488,7 +488,49 @@ def main(argv: list[str] | None = None) -> None:
         if net is not None and gross is not None and float(gross) > 1e-9:
             # Near 1 is a gait; near 0 is the cap being shaken back and forth.
             line.append(f"net/gross {float(net) / float(gross):+.2f}")
+
+        # M6: the four numbers that say whether a rising reward is a gait or a grind, because
+        # `reward` and `success` cannot tell them apart -- every M5 seed scored 100% success
+        # with a one-sided push. `paid` is the fraction of the cap's gross rotation that the
+        # pinch produced and the stroke budget paid for: 100% on the scripted reference gait,
+        # 7-11% on every policy M5 produced. NOTES.md, M6.
+        paid = metrics.get("eval/episode_paid_rotation")
+        if paid is not None and gross is not None and float(gross) > 1e-9:
+            line.append(f"paid {float(paid) / float(gross) * 100:5.1f}%")
+        for key, label, fmt in (
+            ("eval/episode_strokes", "strokes", "{:5.1f}"),
+            ("eval/episode_pinch_per_step", "pinch", "{:+.3f}"),
+            ("eval/episode_opposition_per_step", "opp", "{:+.3f}"),
+        ):
+            value = metrics.get(key)
+            if value is not None:
+                line.append(f"{label} {fmt.format(float(value))}")
         print("   ".join(line), flush=True)
+
+        # M6: every metric to a local JSONL as well, one line per eval. The per-term
+        # `reward/<term>` series used to exist only in W&B, so a run without an API key -- which
+        # a fresh spot box is, until someone sets one -- kept no record of *which term* drove the
+        # return. That is the one thing a reward rebalance cannot be diagnosed without. Appended
+        # rather than rewritten, so a preempted run keeps the history it already has.
+        #
+        # UNITS: `reward/<term>` is the term *before* the `ctrl_dt` multiply that `env.step`
+        # applies to the summed reward, because that is how the env records it as a rate. So a
+        # term's contribution to the episode return is `reward/<term> * ctrl_dt`, and the terms
+        # sum to `eval/episode_reward / ctrl_dt`, not to the return. Checked at step 0 of
+        # capturn-m6-s1: the terms sum to -4.79 against a reported reward of -0.240 = -4.79 *
+        # 0.05. Multiply before quoting one of these next to a return.
+        try:
+            with (logdir / "metrics.jsonl").open("a") as fh:
+                row = {"step": global_step}
+                for key, value in metrics.items():
+                    try:
+                        row[key] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                fh.write(json.dumps(row) + "\n")
+        except OSError as exc:   # a full or read-only disk must not take the run down
+            print(f"  WARNING: metrics.jsonl write failed ({type(exc).__name__}: {exc})",
+                  flush=True)
 
         if run is not None:
             # Brax's metrics are scalars, but anything that is not stays out rather than

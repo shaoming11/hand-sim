@@ -158,6 +158,32 @@ No cap angle in the actor. The cap is rotationally symmetric, so the policy does
 | joint velocity | `-sum(qvel_hand^2)` | 1e-4 |
 | success | one-time bonus when cumulative rotation passes `4*pi` | 10.0 |
 
+**M6 revision: `rotate` is gone, and rotation is paid by the grasp rather than alongside it.**
+The table above was measured against the trajectories in `artifacts/` and it ranks the
+hand-authored reference gait **last of five**, behind every policy M5 produced including one
+that failed the task outright; the flick exploit ranks first, by 2.3x. Two causes: the terms
+were *added*, so turning the cap badly and holding it well were alternatives, and `rotate`'s
+per-step rate clip paid a bursty gait only 50.1% of its own rotation while paying a continuous
+grinder all of it. The term is now
+
+    twist = pinch * clip(d_theta, 0, stroke_budget_remaining) / ctrl_dt
+
+with `stroke_budget` (60 deg) refilling only when a new grip begins, so two full turns need at
+least twelve strokes and "twist it several times" follows from the budget rather than from a
+term asking for cycles. `slip`, `backdrive` and `bottle` are added, the opposition factor
+saturates at 150 deg rather than 180 (which is where the re-fitted pose puts the pinch, and
+where the bottle neck is not), and `success` goes to 100.0. There is no rate clip and no
+angular-velocity cost: both punish the reference gait harder than any measured exploit.
+`scripts/score_reward.py` scores a saved trajectory with the live reward and
+`tests/test_reward_ranking.py` pins the ordering, so this is checkable before a GPU run rather
+than after one. See NOTES.md, M6.
+
+**Not revised, and worth stating plainly:** a person unscrews a cap with forearm pronation, and
+this hand has none — `rh_forearm` is fixed and the wrist only flexes and deviates. The task as
+specified is therefore finger-gaited in-hand rotation, and M6 shapes the grasp, the stroke and
+the cadence of the human motion but not its actuation. Adding a forearm roll DoF would change
+the "base fixed in the air" decision above and is left for you to call.
+
 **Termination.** NaN in qpos or qvel. All gaiting fingertips more than 10 cm from the cap, or the grasp lost for `grasp_grace_steps` consecutive steps. Otherwise fixed length.
 
 **M5 revision: the gait is two-fingered.** This file specified three gaiting fingertips (thumb, index, middle) throughout. It is now the thumb and index finger only -- a lateral pinch, which is how a person unscrews a cap. The middle, ring and little fingers are costed for touching the cap (`reward_config.scales.idle_contact`) rather than merely unrewarded. The measurement that forced it: on the M1 scripted gait the middle finger is in contact on 93.8% of frames against the index's 64.6%, and the first policy trained against the opposition reward leaned on the middle finger hardest of all (71.3% of steps) while leaving the thumb pad 12.15 mm off the cap. Both are legitimate three-finger grasps and neither is the one this task is for. See NOTES.md, M5.

@@ -44,6 +44,30 @@ project. It does **not** achieve what the change was for: the middle finger back
 and stays the closest tip. Separating "resting on the cap" from "8 mm away" needs contact force,
 not a fingertip-site distance. Details in [`NOTES.md`](NOTES.md), M5.
 
+**M6 (reward design): the M5 reward ranked the reference gait last of five.** Scoring every
+trajectory in `artifacts/` with the live reward -- the hand-authored scripted gait and the four
+policies M5 produced -- the M5 reward puts the **flick exploit first** and the **scripted gait
+last**, by 2.3x; a policy that failed the task outright still outranks the gait by 2.1x. Two
+compounding causes: the terms were *added*, so turning the cap badly and holding it well were
+alternatives rather than one behaviour, and `rotate`'s per-step rate clip paid a bursty gait
+only **50.1%** of its own rotation while paying a continuous grinder all of it. Tightening that
+clip -- the obvious first move -- pays the gait 17%.
+
+So rotation is now paid *by* the grasp and budgeted per grip:
+`twist = pinch * clip(d_theta, 0, stroke_budget_remaining) / dt`, with the 60 deg budget
+refilling only when a new grip begins. Two full turns then need at least twelve strokes, which
+makes "twist it several times" a consequence of the budget rather than a term asking for cycles.
+With `slip`, `backdrive` and a bottle-contact cost added, and opposition saturating at 150 deg
+(where the re-fitted pose puts the pinch) instead of 180 (where the bottle neck is), **the
+ranking inverts completely**: the scripted gait is the only trajectory with a positive return
+and the flick is last. `paid_rotation / cap_rotation_abs` is 100% for the gait and 7-11% for
+every policy. Nothing has trained yet. Details in [`NOTES.md`](NOTES.md), M6.
+
+One thing M6 explicitly does not fix: a person unscrews a cap with **forearm pronation**, and
+this hand has none -- the forearm is fixed and the wrist only flexes and deviates. The task as
+specified is finger-gaited in-hand rotation, and M6 shapes the grasp, the stroke and the cadence
+of the human motion but not its actuation.
+
 ## Setup (Mac, CPU)
 
 ```bash
@@ -73,9 +97,13 @@ and **contact force** to see where the grip is acting. `[` and `]` cycle the cam
 ## Checking it
 
 ```bash
-python3 -m pytest tests/ -q               # 73 checks, ~11 s -- the M0-M5 done-criteria
+python3 -m pytest tests/ -q               # 81 checks, ~25 s -- the M0-M6 done-criteria
 HAND_SIM_SLOW=1 python3 -m pytest tests/ -q   # adds the MJX-Warp rollouts (minutes on CPU)
 python3 scripts/view_scene.py --report    # scene summary, actuator limits, pregrasp geometry
+
+# what the reward would pay for every trajectory in artifacts/, before spending a GPU hour
+python3 scripts/score_reward.py
+python3 scripts/score_reward.py artifacts/squeeze_twist.npz --per-step
 
 # CPU MuJoCo vs MJX-Warp, plus buffer sizing for training
 python3 scripts/check_parity.py
@@ -137,6 +165,14 @@ asks for what a bottle-cap grasp actually is: the thumb and the index finger bot
 anywhere along their length, and on opposite sides. See `NOTES.md`, "What the flick policy was
 actually doing". `action_rate` at 0.01 is still a third of the reward signal for an untrained
 policy. Measured numbers in `NOTES.md`.
+
+At M6 `rotate` became `twist`, which is `grasp` times the rotation the current grip's 60 deg
+budget still allows -- so rotation produced without a pinch pays nothing (and `slip` charges for
+it), and a grip that never releases is paid for one stroke however far it turns the cap. The
+reason it is a product rather than a second term is measured rather than argued:
+`scripts/score_reward.py` scores a saved trajectory with the live reward, and under the M5
+weights the scripted reference gait came last of five. `tests/test_reward_ranking.py` pins the
+ordering so that cannot happen quietly again.
 
 ## Training
 
@@ -217,9 +253,9 @@ capturn/env.py             the MjxEnv subclass -- obs, reward, termination
 capturn/config.py          env config and the Brax PPO config
 capturn/compat.py          two shims for the installed Brax/JAX pair
 scripts/                   fit_pregrasp, view_scene, squeeze_twist, check_parity,
-                           benchmark, train, eval, render
+                           benchmark, train, eval, render, score_reward
 tests/                     M0 scene checks, M1 gait, M2 parity, M3 benchmark harness,
-                           M4 env, M5 training and eval
+                           M4 env, M5 training and eval, M6 reward ranking
 artifacts/                 generated trajectories and video (gitignored)
 logs/                      training runs: checkpoints and configs (gitignored)
 ```

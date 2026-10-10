@@ -96,20 +96,40 @@ def test_grasp_needs_the_thumb_opposed_to_the_index_not_a_one_sided_push(env):
     is a product, so being on the cap is not enough if both surfaces crowd the same side --
     which is exactly what the first trained policy did: index gripping at 0.3 mm, thumb 20 mm
     out, contacts 66 deg apart instead of opposed.
-    """
-    import jax.numpy as jp
 
-    k = env._config.reward_config.grasp_sharpness
-    term = lambda thumb, index, opp: float(
-        jp.exp(-k * jp.maximum(thumb, index)) * jp.clip(opp, 0.0, 1.0)
-    )
-    opposed = term(0.0022, 0.0064, +0.78)     # the M1 scripted gait, measured
+    M5, and M6 reshaped the opposition factor twice over. `jp.clip(opposition, 0, 1)` was a
+    cliff: flat below zero in value *and* derivative, where the trained policy sat 98.4% of the
+    time, so the term was unlearnable rather than merely small. And its peak was at 180 deg,
+    which the re-fitted pose cannot reach without putting a finger in the bottle neck. It now
+    saturates at `opposition_target_deg` and is monotone everywhere below it.
+
+    Calls the env's own term rather than restating it -- `pinch_quality` is public for that
+    reason, and NOTES.md M5 records a reported number that drifted from the reward because a
+    checker had its own copy.
+    """
+    term = lambda thumb, index, opp: float(env.pinch_quality(thumb, index, opp))
+
+    opposed = term(0.0022, 0.0064, +0.87)     # the reference gait, measured: 150.2 deg
     one_sided = term(0.0200, 0.0003, -0.34)   # the flick policy, measured
-    index_only = term(0.0200, 0.0003, +0.78)  # index gripping well, thumb simply absent
+    index_only = term(0.0200, 0.0003, +0.87)  # index gripping well, thumb simply absent
 
     assert opposed > 0.3, "a real lateral pinch must score most of the term"
-    assert one_sided == 0.0, "same-side contacts are not a grasp at any depth"
+    assert opposed > 5 * one_sided, "same-side contacts are not a grasp at any depth"
     assert opposed > 3 * index_only, "one surface on the cap must not pay like two"
+
+    # M6: a gradient everywhere, including the same-side region a fresh policy starts in
+    assert term(0.002, 0.002, -0.6) > term(0.002, 0.002, -0.8) > 0.0, (
+        "the old `clip` gate was flat here, which is what made opposition unlearnable"
+    )
+    # M6: and no pay for reaching past the pose's 150 deg into the bottle
+    target = env._config.reward_config.opposition_target_deg
+    at_target = -np.cos(np.radians(target))  # `opposition` is -cos(azimuth between the two)
+    assert term(0.0, 0.0, at_target) == pytest.approx(1.0, abs=1e-6)
+    assert term(0.0, 0.0, 1.0) == pytest.approx(1.0, abs=1e-6), (
+        "180 deg must not be worth more than the 150 the pose can reach"
+    )
+    # M6: penetrating the cap cannot score above a clean rest on it
+    assert term(-0.004, -0.004, +0.87) == pytest.approx(term(0.0, 0.0, +0.87), abs=1e-6)
 
 
 def test_grasp_counts_the_whole_index_finger_not_just_the_fingertip(env):
@@ -170,9 +190,15 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "success",  # the 4*pi crossing -> sums to the success flag
     } <= set(state.metrics)
     assert set(scales) == {
-        "rotate", "grasp", "idle_contact", "action_rate", "torques", "joint_vel", "success"
-    }, ("seven terms: the PRD's, with `reach` replaced by `grasp` and `idle_contact` added to "
-        "keep the middle finger off the cap -- NOTES.md, M5")
+        "twist", "grasp", "slip", "backdrive", "bottle",
+        "idle_contact", "action_rate", "torques", "joint_vel", "success",
+    }, ("M6: `rotate` became `twist` -- rotation gated by the pinch and budgeted per grip -- "
+        "with `slip`, `backdrive` and `bottle` added. NOTES.md, M6")
+    assert {
+        "strokes",  # -> grips taken in the episode
+        "paid_rotation",  # -> radians the budget paid for
+        "slip_rotation",  # -> radians the pinch did not produce
+    } <= set(state.metrics), "M6: the three numbers that say whether a rollout is a gait"
 
 
 def test_reset_and_step_are_jittable(env):
@@ -207,13 +233,21 @@ def test_action_delay_buffer_is_sized_whether_or_not_delay_is_enabled():
 
 
 def test_buffer_sizing_matches_the_measured_counts():
-    assert capturn_config.NACONMAX_PER_WORLD == 44  # M2, ncollision with 2x headroom
+    # M6: 64, up from M2's 44. The 44 was probed on the *tripod* pregrasp; on the re-fitted
+    # two-finger pose `check_parity.py --probe` asks for 46 per world, so 44 was below the
+    # requirement and would have dropped contacts silently through a whole run. 64 leaves
+    # headroom for an untrained policy, which loads contacts far harder than the scripted gait
+    # the probe uses. NOTES.md, M6.
+    assert capturn_config.NACONMAX_PER_WORLD >= 46, (
+        "the re-fitted pose measures 46 per world; anything less overflows the contact buffer"
+    )
+    assert capturn_config.NACONMAX_PER_WORLD == 48
     assert capturn_config.NJMAX == 150
     # M3: 16384 allocates fine on an H200/Blackwell in a fresh process, it is just 4.6% slower
     # (30,856 vs 32,358 control-steps/s). The H100's allocation failure was the single-process
     # JAX/Warp starvation mode, not a ceiling. 8192 wins on throughput. NOTES.md, M3.
     assert capturn_config.NUM_ENVS == 8192
-    assert capturn_config.default_config().naconmax == 44 * 8192, "naconmax is a total"
+    assert capturn_config.default_config().naconmax == 48 * 8192, "naconmax is a total"
 
 
 def test_ppo_config_asks_for_asymmetric_actor_critic():

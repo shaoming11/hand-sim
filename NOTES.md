@@ -1720,6 +1720,534 @@ measure is supposed to say. The wrist share lands at 9.7% against the 8.3% a uni
 would give, so the baseline is roughly proportionate and the measure has room to detect a
 wrist-twisting exploit.
 
+## M6 — design: a reward that mimics the human motion
+
+Design work on the M5 reward, filed as its own milestone because it is a milestone's worth of
+change. The PRD's own M6 (sensitivity sweep) and M7 (DR) are unaffected and still follow this.
+**Nothing here has trained.** Everything below is measured on CPU against trajectories already
+on disk, which is the point of it.
+
+### What the human motion is, and which part of it this scene cannot express
+
+A person opening a water bottle does five things, in rough order of how much each matters:
+
+1. **The twist comes from forearm pronation**, not the fingers. The fingers hold; the forearm
+   turns, 60-90 deg per stroke.
+2. **The stroke is bounded, so the motion is cyclic**: grip, turn, release, counter-roll clear
+   of the cap, re-grip. Two full turns is 8-12 cycles. "Several times" is a *consequence* of the
+   roll limit, not a separate goal.
+3. **The grasp is a pad-to-side lateral pinch** and the cap turns *with* the hand. Cap-under-
+   finger slip is the failure mode, not the mechanism.
+4. **The cadence is slow** — roughly 20-40 deg/s averaged, with the rotation concentrated in the
+   stroke.
+5. The cap climbs its thread and eventually comes free, which is a second reason to re-grip.
+
+**Point 1 is not available in this scene.** `rh_forearm` has no joint to the world and
+`rh_WRJ1`/`rh_WRJ2` flex and deviate, so there is no pronation — M1 recorded this as a finding
+("the twist *must* come from the fingers") without recording what it costs. What it costs is
+that the task as built is *finger-gaited in-hand rotation*, a LeapCubeRotateZAxis cousin, and
+not the human bottle-cap motion. Every M5 symptom descends from it: the index finger does the
+work because it is the only finger that can generate torque against the cap on its own, and the
+thumb is along for the ride. Adding a roll DoF is the one change that would make the task the
+human one, and it is a PRD-level decision (the fixed base is in "Decisions already made"), so it
+is **not** done here. Point 5 is the PRD's own stretch item and is also not done.
+
+What M6 *does* do is points 2, 3 and 4, which are reward-shaped rather than scene-shaped.
+
+### The measurement that condemns the M5 reward
+
+`scripts/score_reward.py` replays a saved trajectory through `CapTurn.evaluate` — the env's own
+per-step reward — and prints what it would earn. Run over everything in `artifacts/`: the
+re-fitted scripted gait, and the four recorded policy episodes M5 produced. The M5 column
+reconstructs `rotate` and `grasp` from the same traces and takes the other terms from the live
+scoring, where they are unchanged.
+
+| recording | s | **M5 return/s** | **M6 return/s** |
+|---|---|---|---|
+| scripted reference gait | 9.6 | **+0.4382** | **+0.5122** |
+| policy: best 3-finger seed | 20.0 | +1.0091 | -0.4787 |
+| policy: 2-finger, sharp idle cost | 20.0 | +1.0154 | -0.4906 |
+| policy: 2-finger seed 2 (**0% success**) | 6.7 | +0.9337 | -0.3345 |
+| policy: early flick exploit | 20.0 | **+1.0182** | **-1.0921** |
+
+**Under the M5 reward the hand-authored reference gait ranks last of the five, and the flick
+exploit ranks first.** By 2.3x. A policy that failed the task outright still outranks the
+reference gait, by 2.1x. This is not a tuning miss and it is not subtle: for eight months of
+milestones the reward has been asking for the flick, every seed has duly delivered one, and the
+project has been reading the result as a training problem.
+
+Two reasons, and they compound.
+
+**The terms were added, so rotation and grasp were alternatives.** `reward = rotate + 0.15 *
+grasp + ...`, and `rotate` paid for cap rotation however it was produced. A policy could take
+either, and rotation was worth more.
+
+**And the rate clip subsidised the grind.** `rotate` was `clip(d_theta/dt, -0.5, 1.0)`. A gait
+is *bursty* — it turns the cap hard during the twist phase and not at all while it regrips —
+so a per-step rate bound bites the gait and not the grind. On the reference gait, whose rate is
+0.172 rad/s at the median and 3.811 rad/s at the peak:
+
+| | paid | of its 7.339 rad |
+|---|---|---|
+| `rotate_clip = 1.0` (M5) | 3.673 rad | **50.1%** |
+| `rotate_clip = 0.25` | 1.251 rad | 17.0% |
+| no clip | 7.339 rad | 100.0% |
+
+The clip paid the reference gait half of what it earned while paying a continuous grinder all
+of it. **Tightening the clip — the obvious first move, and the one this work started with —
+makes it worse, not better**, and for the same reason there is now no angular-velocity cost: at
+3.811 rad/s the reference gait would pay one harder than any exploit measured.
+
+### The reward
+
+Rotation is no longer paid on its own. It is paid by the pinch, and budgeted per grip:
+
+    twist = pinch * clip(d_theta, 0, budget) / dt          weight 1.0
+
+* **`pinch`** is the grasp term itself, in [0, 1]: `exp(-100 * max(thumb_gap, index_gap))` times
+  a factor that saturates at `opposition_target_deg`. One implementation, `env.pinch_quality`,
+  called by the reward, by `eval.py` and by the tests.
+* **`budget`** is what is left of `stroke_budget` (60 deg) for the *current grip*, and it
+  refills when a new grip begins. Two full turns therefore need at least twelve strokes.
+  Nothing asks for cycles; the budget makes them the only way to score.
+
+A grip begins and ends hysteretically on `max(thumb_gap, index_gap)`, at 5 mm and 11 mm. Both
+thresholds are read off the reference gait, which has to be paid in full: across its twelve
+cycles the grip closes to 0.94-2.83 mm and the release opens to 12.21-18.24 mm, so the thinnest
+margin is 1.2 mm. The 6 mm dead band is what stops a policy refilling the budget by chattering —
+crossing it is a real 6 mm excursion, several control steps each way.
+
+The rest, with every weight justified in `config.py`:
+
+| term | definition | weight | on the reference gait |
+|---|---|---|---|
+| `twist` | `pinch * paid / dt` | +1.0 | +4.941 |
+| `grasp` | `pinch` | +0.15 | +0.757 |
+| `slip` | `(1 - pinch) * abs(d_theta) / dt` | -0.25 | -0.600 |
+| `backdrive` | `-min(d_theta, 0) / dt` | -1.0 | -0.000 |
+| `bottle` | margin intrusion of either pinch surface | -0.05 | -0.000 |
+| `idle_contact` | unchanged from M5 | -0.05 | -0.000 |
+| `action_rate` / `torques` / `joint_vel` | unchanged | | -0.180 |
+| `success` | the 4*pi crossing | +100.0 | 0 (9.6 s is too short) |
+
+**`slip` is what actually kills the exploits** — it charges for rotation the pinch did not
+produce, and against `twist` the two cancel at `pinch = 0.2`. Below a fifth of a grasp, turning
+the cap is worth less than leaving it alone. It costs the reference gait -0.600 against +4.941
+of `twist` (a 12% tax for a 0.63 pinch, which a tighter grip would recover) and costs the flick
+exploit **-27.191**.
+
+**`backdrive` closes a hole nothing was observed using but the reward was paying for**: `rotate`
+clipped its downside at -0.5 while paying up to +1.0, so a cap shaken symmetrically back and
+forth was worth +0.5 a cycle.
+
+**Opposition saturates at 150 deg, not 180.** The M5 term was monotone to 180, and the pregrasp
+fit had already measured that 180 puts a finger into the bottle neck and that *every* gait
+variant there hits the bottle. So the reward was asking for a configuration the pose is built to
+avoid. The re-fitted gait sits at **150.2 deg** of opposition at the median — exactly its target
+— and now scores a full 1.0 on the factor.
+
+**The bottle cost is new.** Nothing costed bottle contact before, and the three high-rotation
+recorded policies are inside the bottle's margin on 15-38% of their steps. The margin is 2 mm,
+set so the term is exactly zero on the reference gait, whose closest approach over 192 steps is
+3.41 mm (p1 3.75). Inside the margin it ramps linearly and keeps going past contact, because
+`scene.cylinder_sdf` is signed — penetrating costs more than touching. (`surface_distance`, which
+the cap terms use, squares its radial term and so reports a point *inside* a cylinder as
+comfortably clear. That is harmless for the cap, where the fingers are always outside, and would
+have been a silent hole for the bottle.)
+
+### What separates a gait from a grind, in three numbers
+
+`paid_rotation / cap_rotation_abs` is the one to watch, and it needs no video:
+
+| | strokes | net rotation | paid | pinch | opposition |
+|---|---|---|---|---|---|
+| scripted reference gait | 12 | +420.5 deg | **100.0%** | 0.626 | +0.868 |
+| policy: best 3-finger seed | 7 | +4634.1 | 10.1% | 0.009 | -0.855 |
+| policy: 2-finger, sharp idle | 6 | +4255.5 | 7.3% | 0.024 | -0.664 |
+| policy: 2-finger seed 2 | 0 | +518.0 | 10.9% | 0.001 | -0.900 |
+| policy: early flick | 11 | +7464.4 | 9.0% | 0.044 | -0.515 |
+
+The policies turn the cap ten to eighteen times further than the scripted gait and 90% of it is
+rotation no pinch produced. `strokes` also shows why a release counter alone would not have been
+enough: the flick registers eleven of them, as many as the gait, because it does repeatedly pass
+through the hysteresis band — it just never grips in between.
+
+### Two sanity checks the gate had to clear
+
+**Cold start.** Gating rotation on the pinch risks a policy that can never discover `twist`
+because it never pinches. Measured at the `pregrasp` pose: `pinch = 0.684`, thumb 3.27 mm, index
+0.63 mm, opposition +0.769. The gate is two-thirds open at reset, so the policy starts with a
+live gradient on the term and only has to turn the cap. Not a proof — the first real run is —
+but the failure mode this was feared for is not present at the start state.
+
+**The do-nothing optimum.** Parking at the pregrasp pose for a full 1200-step episode returns
+**+6.15**; the reference gait's measured rate over the same 60 s returns **+30.73**. A 5.0x
+margin, against M4's 2.4x.
+
+**And a ceiling on the success weight, worth recording before someone raises it.** At 100.0 the
+bonus is 5.0 of return. The exploits sit at -9.6 to -21.8 *including* it, so a weight above
+roughly **290** would make grinding to 4*pi net-positive again. There is a 2.9x margin at 100
+and it is not a knob to turn freely.
+
+### `scripts/score_reward.py` and `tests/test_reward_ranking.py`
+
+The real deliverable of this milestone is not the reward, it is that the reward is now
+*checkable before training*. Twice at M5 a reported number turned out to be computed differently
+from the thing it claimed to measure — reset-pose penetration, and the grasp term in
+`grasp_summary`, which kept the old gate and reported 0.000 where the truth was 0.103. Both were
+in code written to check the reward. So:
+
+* `CapTurn.evaluate` is the single per-step implementation; `step` calls it and so does the
+  scorer, over states read back from a recording.
+* `eval.py`'s `grasp_summary` no longer carries its own copy of the grasp term — it calls
+  `env.pinch_quality`.
+* `tests/test_reward_ranking.py` pins the ordering. Three tests always run (~30 s): the scripted
+  gait is *generated in-process*, so they need no artifacts. The recorded policies are gitignored
+  and their test is gated behind `HAND_SIM_SLOW`.
+
+The clean statement of the budget property is a test with the physics taken out: freeze the hand
+at the `pregrasp` pinch and advance only the cap's hinge. That is the pure grind — one grip, held
+forever, cap turning without limit — and it must be paid for exactly `stroke_budget` of the 8 rad
+it turns, with the last turn earning zero. A second test compares the scripted gait against the
+same gait with its release amplitude set to zero: +420.5 deg against +399.1, within 5% on
+rotation, 100% paid against 52%, and 1.8x on return. (Not a *pure* grind — the return sweep backs
+the tips off incidentally, so four of its twelve cycles still register as releases.)
+
+Scoring injects recorded states rather than re-simulating, so the geometry and sensors are
+exactly those of the recording; `qvel` is the control-rate difference of `qpos` (it feeds
+`joint_vel` only) and the scripted gait's action is recovered by inverting the delta integrator,
+which saturates on 9.0% of entries (it feeds `action_rate` only). Warp prints `ITERATIONS`
+overflow on some of the recorded policy states, which are poses the solver finds hard; the
+kinematic terms that decide the ranking do not depend on the solver converging.
+
+### Pre-flight on the GPU box, and one thing it caught
+
+2026-10-09, a fresh **RTX PRO 6000 Blackwell Server Edition, 96 GiB, sm_120**, driver 595.91.07,
+30 vCPU / 88 GiB — the same class of box as the M5 retrain and again not matching the PRD's
+machine row. Pre-flight before training, in the order run:
+
+| check | result |
+|---|---|
+| stack on sm_120 | jax 0.11.2 + jaxlib cuda12, mujoco/mjx 3.14.0, warp-lang 1.17.0, brax 0.14.2 — **unmodified**, `jax.default_backend()` = gpu |
+| `pytest tests/` | **81 passed**, 14 skipped, 129 s |
+| `score_reward.py` | **bit-identical to warp-CPU** on all five trajectories (gait +0.5122/s, flick -1.0921/s) |
+| `check_parity.py` M2.1 | CPU +420.50 deg vs warp +420.50 — **0.0%**, the best the project has recorded |
+| `check_parity.py` M2.2 | halving `sim_dt`: **1.6%** (M5 on the tripod pose: 3.3%) |
+| `check_parity.py` M2.3 | no overflow flags, `nacon` 4, `ncollision` 23, `nefc` 41, solver 8 of 50 |
+
+**The ranking is not a backend artifact.** Every number in `score_reward.py` reproduces exactly
+on CUDA warp against warp-CPU on the Mac, to the printed precision. That was worth checking
+before spending GPU time on a reward justified entirely by CPU measurements.
+
+**And `naconmax` was undersized — M2's figure was measured on a pose that no longer exists.**
+The probe asks for **46 contacts per world** on the re-fitted two-finger pregrasp
+(`ncollision` 23 at 2x headroom) against the configured **44**. The M2 number was probed on the
+*tripod* pose, and the pregrasp re-fit at the end of M5 changed the geometry without anyone
+re-probing. A run at 44 would have overflowed the contact buffer and dropped contacts —
+silently, since warp reports overflow on the Data rather than raising, and in a scene where the
+whole reward is built on contact geometry.
+
+Raised to **64** per world rather than 46: the scripted gait is the gentlest loading case in the
+project and an untrained policy is the harshest (M4 measured -4.5 mm of penetration and an
+`EPA_HORIZON` flag under a random policy, against this gait's -0.288 mm), so the margin is worth
+about a gigabyte of 96. `njmax` stays 150 against a measured 82.
+
+The general lesson, and it has now cost twice: **a geometry change invalidates every buffer
+measurement taken before it.** `check_parity.py --probe` is 90 seconds and belongs in the
+pregrasp-refit checklist, not just the milestone checklist.
+
+**Image deviations from the runbook** (the Daytona image has moved since M3):
+
+* The system Python is **PEP 668 externally-managed**, so `pip3 install` refuses outright.
+  `PIP_BREAK_SYSTEM_PACKAGES=1` is the pragmatic answer on a disposable spot box; a venv is the
+  tidy one. The image ships torch 2.11.0+cu128 that nothing here needs.
+* **No `git`** (still) and **no `tmux`** — but `apt-get install -y tmux` works, where M3 recorded
+  no package manager usable. Sync is still `tar czf - . | ssh HOST 'tar xzf - -C /root/hand-sim'`.
+* `MUJOCO_GL` left unset, per M3. Not re-tested; nothing here renders.
+
+### The first M6 training runs: the reward holds across seeds, the gait is one-sided
+
+2026-10-10, Blackwell box, `num_envs = 8192`. Seed 1 to 72.1M (budget 150M, cut short by the OOM
+below, converged since ~32M); seeds 2 and 3 at 52.4M, which is past convergence with margin.
+`--no-wandb`, so every number here comes from `logs/<run>/metrics.jsonl` and the progress log.
+
+#### Seed 1, the whole curve
+
+| step | reward | success | paid | strokes | pinch | opp |
+|---|---|---|---|---|---|---|
+| 0 | -0.240 | 0.0% | 1.4% | 0.6 | 0.301 | +0.947 |
+| 6.6M | +36.838 | 100.0% | 49.7% | 33.9 | 0.790 | +0.848 |
+| 13.1M | +115.796 | 100.0% | 95.7% | 131.7 | 0.676 | +0.880 |
+| 19.7M | +134.799 | 100.0% | 96.2% | 143.0 | 0.717 | +0.897 |
+| 26.2M | +143.296 | 100.0% | 97.3% | 150.0 | 0.738 | +0.909 |
+| 32.8M | +143.858 | 100.0% | 96.8% | 149.5 | 0.748 | +0.923 |
+| 39.3M | +145.410 | 100.0% | 99.6% | 149.5 | 0.752 | +0.928 |
+| 52.4M | +146.777 | 100.1% | 98.4% | 150.0 | 0.762 | +0.951 |
+| 65.5M | +156.183 | 100.0% | 99.4% | 150.0 | 0.759 | +0.935 |
+| 72.1M | +158.448 | 100.0% | 99.2% | 150.0 | 0.766 | +0.935 |
+
+Three things to read off it. **Success arrives at 6.6M, against M5's 26.2M**, and it arrives with
+a real grasp rather than by stumbling into a spin. **The 65.5M step where the M5 config collapsed**
+(reward 20.98 -> 2.84, success 100% -> 0%) **passes without incident**, stepping up if anything.
+And the policy spends the back half of the run improving *grip quality* while rotation stays flat
+-- pinch 0.738 -> 0.766, opposition +0.909 -> +0.935 -- which is the reward preferring a better
+grasp once rotation is maxed.
+
+Per-term, at 6.6M and 13.1M (return units; `reward/<term>` is logged pre-`ctrl_dt`):
+
+| term | 0 | 6.6M | 13.1M |
+|---|---|---|---|
+| twist | +0.002 | +25.938 | **+107.331** |
+| grasp | +0.057 | +7.113 | +6.083 |
+| success | 0.000 | +5.020 | +5.000 |
+| slip | -0.049 | -0.910 | -1.511 |
+| backdrive | **-0.216** | -0.064 | -0.035 |
+| bottle | -0.032 | -0.131 | -0.063 |
+| everything else | -0.001 | -0.125 | -1.064 |
+
+`twist` is 93% of the return by 13.1M, which is the structural claim of M6 doing the earning.
+`backdrive` dominates at initialisation (90% of the step-0 magnitude) because an untrained policy
+*tightens* the cap; it falls 3.4x while `pinch` more than doubles, so the policy stopped
+backdriving by gripping better rather than by letting go, which was the risk of weighting it.
+
+**Step-0 episodes terminate after about 25 steps** on grasp loss, so no step-0 total is over a
+60 s episode -- `grasp` reads +0.057 where a full episode of the same pose pays ~2.7. Worth
+knowing before comparing a step-0 row against anything else.
+
+#### Three seeds: two land together, the third finds a different solution
+
+Final evals -- seed 1 at 72.1M, seed 2 at 54.4M, seed 3 at 52.4M (all converged; 1024 episodes
+each, deterministic):
+
+| | seed 1 | seed 2 | seed 3 | ref gait |
+|---|---|---|---|---|
+| success | **100.00% +- 0.00** | **100.00% +- 0.00** | **100.00% +- 0.00** | -- |
+| return | +158.45 | +131.39 | **+218.55** | ~+30.7 |
+| twist / slip | 150.30 / -0.57 | 123.21 / -0.20 | 218.66 / **-8.13** | -- |
+| strokes | 150.0 | 162.1 | 133.4 | 75 |
+| cap deg/s | 146.8 | 120.8 | **273.5** | 43.8 |
+| paid % | 99.2 | 98.0 | **79.2** | 100 |
+| pinch | 0.77 | 0.72 | 0.63 | 0.63 |
+| opposition | +0.94 | +0.91 | +0.83 | +0.87 |
+| penetration | -0.286 | -0.416 | **-0.242 mm** | -0.566 CPU |
+| wrist share | 17.8% | 15.6% | 24.5% | -- |
+
+All three pass the PRD's M5 criterion 1 outright and all three turn the cap monotonically
+(net/gross +1.000) with a fully opposed grip on 100% of steps. Seeds 1 and 2 converge to the same
+operating point; seed 3 converges to a different one -- half the paid fraction, twice the speed,
+a looser average pinch, and the only genuine two-finger gait of the three (above).
+
+**A measurement that does not add up, and should be chased before any per-stroke figure for seed
+3 is quoted.** The budget caps paid rotation at 60 deg per grip, so 133.4 strokes permits at most
+7,980 deg paid -- but `paid_rotation` reads 12,996 deg. Working backwards, 12,996/60 = 217 grips,
+which gives 75.6 deg/stroke and a paid fraction of 79.4% against the 79.2% observed. So **the
+budget is behaving and the `strokes` metric is undercounting by about 40%** on this seed.
+`eval.py`'s independent regrip counter agrees with the metric (132.35), so both share the blind
+spot -- most likely grips that engage and release faster than the hysteresis band resolves.
+Seeds 1 and 2 are self-consistent (58.7 and 44.7 deg/stroke, both inside the budget, paid ~99%),
+so it bites only where releases are fast. Third time in this project that a number computed to
+check the reward has turned out to measure something else.
+
+#### Seeds 1 and 2 at a common checkpoint
+
+Seed 1 at 26.2M against seed 2 at 25.2M:
+
+| measure | seed 1 | seed 2 | reference gait |
+|---|---|---|---|
+| reward | 143.30 | 122.82 | ~30.7 |
+| success | 100.00% | 100.00% | -- |
+| **paid** | **97.3%** | **97.9%** | 100% |
+| slip | 1.6% | 1.3% | 0% |
+| pinch | 0.74 | 0.72 | 0.63 |
+| opposition | +0.91 | +0.88 | +0.87 |
+| strokes/s | 2.50 | 2.21 | 1.25 |
+| deg/stroke | 53.8 | 50.4 | 35 |
+| cap deg/s | 134.5 | 111.6 | 43.8 |
+
+**This is what M5 never had.** There, seed 1 reached +0.600 opposition and seed 2 fell to
+**-0.463** -- two different qualitative solutions, and the notes concluded the reward "makes the
+opposed grip reachable, not inevitable". Here both seeds land in the same place on every quality
+measure from visibly different initialisations (seed 2 starts at opposition +0.408 against seed
+1's +0.947). The reward admits one solution now, not two.
+
+#### Criterion 1 passes outright; criterion 2 passes on grasp and fails on symmetry
+
+`eval.py` on seed 1 at 72.1M, 1024 episodes, deterministic:
+
+| | seed 1 | M5 best | M1 gait |
+|---|---|---|---|
+| success rate | **100.00% +- 0.00** | 100% | -- |
+| net/gross | +1.000 | -- | +1.00 |
+| opposition | **+0.978, opposed on 100.0% of steps** | +0.600, 81.8% | +0.868 |
+| grasp term | **0.922** | 0.642 | -- |
+| thumb / index gap | **-0.31 / 0.67 mm** | 1.87 / 0.16 | 2.2 / 6.4 |
+| steps with no tip contact | **0.06%** | 9.2% | -- |
+| steps with 2+ tips | 37.3% | 44.2% | 63.5% |
+| deepest penetration | -0.286 mm | -0.198 | -0.566 CPU |
+| drop rate | 0.00% | -- | -- |
+| wrist share of travel | 17.8% | 6.6% | -- |
+
+The PRD's M5 criterion 1 (>80% success) **passes by a wide margin**, and the grasp is the best
+the project has measured on every metric the reward names.
+
+**Seeds 1 and 2 produce a one-sided gait; seed 3 does not. Thumb participation is
+seed-dependent.** Regrips per episode:
+
+| | seed 1 | seed 2 | **seed 3** | M1 gait |
+|---|---|---|---|---|
+| thumb (`rh_th_tip`) | **0.00** | **0.00** | **132.35** | -- |
+| index (`rh_ff_tip`) | 149.96 | 160.92 | 132.35 | -- |
+| tips on the cap at once | 1.00 | 1.00 | **2.00** | 1.55 |
+| steps with 2+ tips | 37.3% | 28.0% | **55.5%** | 63.5% |
+| steps with none | 0.06% | 0.00% | 44.3% | -- |
+
+In seeds 1 and 2 the thumb **never releases** -- it holds continuously at -0.31 and -0.94 mm
+while the index finger performs all 150-161 strokes against it. That is an index finger stroking
+the cap round against a planted thumb, not two digits repositioning together. Seed 3 regrips
+*both* surfaces in exact lockstep, 132 times, with two tips on the cap at the median and 44% of
+steps gripping nothing at all -- which is what releasing actually looks like.
+
+**This was called a property of the reward after two seeds and that was wrong.** The reward can
+produce the two-fingered gait; two runs in three simply do not find it. It is the same shape M5
+hit with opposition -- "reachable, not inevitable" -- reappearing one level down, for which
+*finger* does the releasing.
+
+Note the direction of the grasp term: seed 3 scores **lowest** on it (0.773 against 0.922 and
+0.856) precisely because it spends 44% of its steps not gripping. Seeds 1 and 2 score higher by
+never letting go. A term meant to reward a good pinch pays more for a hand that never opens.
+
+The reward's *ranking* is nevertheless right -- seed 3 earns +218.55 against +158.45 and +131.39,
+so the true gait wins. What is missing is a reliable basin. The lever is unchanged (per-finger
+stroke accounting: track the release/regrip cycle per surface and pay the *minimum* of the two
+counts) but its purpose is not: it is not needed to make the behaviour possible, it is needed to
+make it the only way to score.
+
+#### The other deviation: cadence
+
+Both seeds converge to 2.2-2.5 strokes/s and 110-135 deg/s, against the reference gait's 1.25
+and 43.8 and a human's rough 1 and 20-40. **There is no term bounding cadence**, and that is a
+consequence of this milestone's own reasoning: the per-step rate clip was removed because it paid
+the reference gait 50.1% of its rotation, and the angular-velocity cost was dropped because the
+gait peaks at 3.811 rad/s. Both of those measurements are about *instantaneous* rate. Neither
+justified leaving *average* cadence free, and the two are separable -- the reference gait averages
+0.76 rad/s while peaking at 3.81; these policies average ~2 rad/s.
+
+The targeted instrument is a **refractory period on budget refills**: a new grip refills the
+budget only if N control steps have passed since the last refill. That bounds stroke *frequency*
+without touching instantaneous dynamics, so it costs the reference gait nothing (its cycle is 16
+control steps; N = 12 caps cadence at 1.67 strokes/s, above the gait and below these policies).
+
+#### `paid %` is only meaningful next to absolute rotation
+
+Seed 2 at 2.3M reads `paid 95.4%` and had turned the cap 36 deg -- less than one 60 deg budget, so
+nearly everything it did was payable. The ratio only separates a gait from a grind once rotation
+is large. Quoting an early `paid %` as progress is the same class of error as the M4 metrics that
+summed to nonsense.
+
+#### The OOM is a per-eval leak in warp, and the fix is to retire the process
+
+Five training processes died with warp "Failed to allocate", and two wrong diagnoses preceded the
+right one. Recorded in order because the wrong turns are the instructive part:
+
+| process | steps covered | **evals** | failing size |
+|---|---|---|---|
+| seed 1, 0 -> 72.1M | 72.1M | **12** | 1.5 GiB |
+| seed 2, 0 -> 25.2M | 25.2M | **12** | 1.5 GiB |
+| seed 2, 25.2 -> 39.6M | 14.4M | **12** | 384 MiB |
+| seed 2, 39.6 -> 49.5M | 9.8M | **16** | 165 MiB |
+| seed 2, 49.5 -> 54.4M | 4.9M | **16** | 165 MiB |
+
+**It is not the step count** -- that spans 72.1M down to 4.9M. **It is the eval count**: 12, 12,
+12, 16, 16. Each eval stands up its own eval env with its own warp buffers, and the memory is
+not returned; GPU use climbs 7.9 GiB at startup to 14.1 GiB by 46M. The failing allocation is
+always warp's, in `collision_convex.convex_narrowphase` calling `warp.empty()`, and the shrinking
+sizes (1.5 GiB -> 165 MiB) are a GPU filling up rather than fragmenting.
+
+Two diagnoses that were wrong, and why:
+
+* **"JAX's pool is growing and starving warp."** Fixed by `PREALLOCATE=true` +
+  `MEM_FRACTION=0.4`. This made it *worse*: the failing allocator is warp's, so reserving 38 GiB
+  for JAX took headroom away from the process that was actually starving. Reverted.
+* **"`naconmax` 44 -> 64 did it."** Plausible -- M5 ran 91.75M steps at 44 without an OOM, and
+  every death came after the raise -- so it went to 48 (above the 46 the re-fitted pose measures).
+  It delayed the next death and did not prevent it. Kept at 48 anyway: the eval at the resume
+  point reproduced to four significant figures, so the smaller buffer is not degrading the
+  physics, and it is nearer M5's proven footprint.
+
+**The fix that worked: chunk by evals.** `run_m6.sh` runs training in fresh processes of
+`--num-evals 6`, half the shortest observed death, resuming each time. Seven consecutive chunks
+completed clean after five straight deaths. The real repair is warp's mempool release threshold,
+which is not attempted here.
+
+**And a Brax detail that bit while sizing the chunks: `num_timesteps` is a floor, not a target.**
+
+    steps_per_epoch = ceil(budget / ((num_evals - 1) * num_envs * unroll_length))
+    actual          = (num_evals - 1) * steps_per_epoch * num_envs * unroll_length
+
+At 8192 envs and `unroll_length` 40 the quantum is 327,680, so a chunk asking for 2.9M ran
+7.5M, and an 8M chunk at `num_evals=24` would have run 15M -- straight back into the death zone.
+Size chunks by evals and treat the step figure as advisory.
+
+#### The resume path, finally measured
+
+Seed 2 crashed at 25,231,360 and was resumed from that checkpoint. Its first eval after the
+restore:
+
+| | before the crash | after the resume |
+|---|---|---|
+| reward | +122.823 | +123.159 |
+| paid | 97.9% | 97.9% |
+| strokes | 132.7 | 132.9 |
+| pinch | 0.720 | 0.719 |
+| opposition | +0.884 | +0.883 |
+
+The checkpoint round-trip returns the same policy to within eval sampling noise. `--resume` has
+been exercised three times today (one preemption, two OOMs) and this is the first time it has been
+*checked* rather than assumed.
+
+#### Solver iterations, not EPA, is now the overflow
+
+Warp flag counts on seed 1 at ~46M against M5's:
+
+| flag | M6 @ 46M | M5 | rate change |
+|---|---|---|---|
+| EPA_HORIZON | **287** | 12,912 @ 13.1M | **~160x lower** |
+| ITERATIONS | **30,435** | 2,619 @ 72M | **~18x higher** |
+| LS_ITERATIONS | 6 | -- | -- |
+| contact-buffer overflow | **none** | -- | -- |
+
+The two move in opposite directions for one reason: **this policy actually grips.** M5's policies
+hovered, so the solver had little to resolve but penetrated deeply when they did touch. M6 holds a
+firm opposed pinch with real contact forces every step, which is shallow and clean (EPA collapses)
+and much harder to solve (the 50-iteration cap is hit far more). M5 expected the opposite --
+"EPA_HORIZON comes back as the policy learns to actually hold the cap" -- and the hulls plus a
+clean grasp beat it.
+
+M3 measured that raising the solver iteration cap is free on GPU, and that the non-converging
+10/20 setting was 6% *slower*, so raising `iterations` past 50 and re-measuring is the obvious
+next step. Not changed mid-run.
+
+### What this does not do
+
+Deliberately out of scope, in the order worth doing them:
+
+* **Touch sensors.** Every gap here is still a distance between geometry, and M5 already
+  concluded twice that distance cannot tell a finger resting on the cap from one 8 mm away. The
+  PRD authorises the fix ("if contact information becomes necessary, use contact sensors") and
+  the Warp backend implements it — `_sensor_touch` in `mujoco_warp/_src/sensor.py`, launched over
+  `naconmax x n_touch`. `pinch_quality` is the single place that would change.
+* **`frictionloss` 0.05 -> 0.10**, which would make the pinch *necessary* rather than merely
+  rewarded: on the re-fitted pose it excludes a lone index finger (0.0920) while leaving the
+  pinch 1.8x headroom (0.1837). Blocked only by `test_hand_can_out_torque_the_thread_friction`
+  demanding 2x, where it reads 1.68x — a spec decision, as M5 left it.
+* **Termination is still distance-based.** `contact_distance` at 20 mm is satisfiable by
+  hovering, which is how the M5 policy never terminated while never gripping. The budget now
+  makes hovering worthless, so this is no longer load-bearing, but it is still wrong.
+* **The forearm roll DoF**, above. The largest change, and the only one that makes this the
+  human motion rather than a good imitation of its grasp.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
@@ -1760,13 +2288,29 @@ wrist-twisting exploit.
   ceiling (0.157 N*m vs 0.05 N*m of thread friction) still says a trained policy can get there,
   but this should be checked against real policy numbers at M5 rather than assumed. M4 adds a
   lower bound for scale: random actions manage 0.8 deg/s.
-- Does `reach` at 0.5 create a do-nothing optimum? Measured at M4: holding the pregrasp pose is
-  worth 8.93 of return against roughly 21 for succeeding, and `reach` is 99.9% of the reward
-  signal at the start. The first weight to touch if M5 stalls with the hand parked on the cap.
+- ~~Does `reach` at 0.5 create a do-nothing optimum?~~ **Closed at M6.** The term is now
+  `grasp` at 0.15, and parking at the pregrasp pose for a full episode returns +6.15 against
+  +30.73 for gaiting at the reference gait's measured rate — a 5.0x margin, against M4's 2.4x.
 - Is `action_rate` at 0.01 too strong early? It is 36% of the absolute signal for a
-  high-entropy policy and ten times `rotate`, which points at freezing.
-- Is a success bonus worth 0.5 of return (10.0 before the `ctrl_dt` multiply) enough to shape
-  anything, or should it be raised, or dropped in favour of the dense rotate term alone?
+  high-entropy policy, which points at freezing. Untouched at M6, where it costs the reference
+  gait -0.168 of +4.917.
+- **M6, and none of it has trained.** The whole reward was re-derived against trajectories on
+  disk; what that cannot tell you is whether it is *learnable*. Three specific risks, in order:
+  (1) `twist` is gated on the pinch, so a policy that loses the grasp early has no rotation
+  signal to find its way back by — `pinch = 0.684` at the reset pose says the gradient is live
+  where training starts, which is reassuring and not a proof; (2) `stroke_budget = 60 deg` is set
+  from the reference gait's 31-47 deg per cycle and is otherwise untuned, and it is the knob that
+  sets how many strokes two turns takes; (3) `slip` at -0.25 is the term doing the work against
+  every exploit and its weight is a first setting, not a measured one. Multi-seed at equal budget
+  before any of it is called a result.
+- Should the grip state machine read force rather than distance? The engage/release thresholds
+  (5 mm / 11 mm) are tip-geometry distances, and M5 established that distance cannot separate a
+  finger resting on the cap from one 8 mm off. The hysteresis band makes this robust enough to
+  measure strokes on the reference gait, but a touch sensor is the honest instrument.
+- ~~Is a success bonus worth 0.5 of return enough to shape anything?~~ **Closed at M6**: no,
+  and it is now 100.0 (5.0 of return). There is a measured ceiling: the recorded exploits sit at
+  -9.6 to -21.8 of return *including* the bonus, so a weight above roughly 290 would make
+  grinding to 4*pi net-positive again. 2.9x of margin, and not a knob to turn freely.
 - What goes in the 12-slot DR parameter block at M7? The slot exists and is zeroed; the
   per-joint `qpos0` offsets are deliberately left out of it.
 - ~~How often should the run checkpoint?~~ **Closed at M5**: `num_evals = 24`, a checkpoint

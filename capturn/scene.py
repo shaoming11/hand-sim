@@ -37,6 +37,12 @@ ALL_TIP_SENSORS = GAIT_TIP_SENSORS + IDLE_TIP_SENSORS
 
 CAP_JOINT = "cap_hinge"
 
+# M6: the geoms a pinch must not reach. The re-fitted pregrasp opposes the two fingers at 150 deg
+# rather than 180 precisely because the far hemisphere is where the neck is, and the reward has to
+# agree with the pose: `reward_config.scales.bottle` costs a pinch surface for entering the
+# bottle's margin. Both are z-aligned cylinders, read from the compiled model.
+BOTTLE_GEOMS = ("bottle_body", "bottle_neck")
+
 # M5: what a bottle-cap grasp actually is. A person opposes the thumb pad against the *side* of
 # the index finger -- a lateral pinch -- not a tripod of fingertips. The first trained policy got
 # half of this right by itself: it drove the cap with `rh_ffmiddle` and `rh_ffproximal`, the
@@ -87,6 +93,35 @@ def grasp_geometry(points, geom_radius, origin, mat, cap_radius: float, cap_half
     planar = closest[:2]
     norm = (planar[0] ** 2 + planar[1] ** 2) ** 0.5
     return flat[best], planar / (norm + 1e-9)
+
+
+def cylinder_sdf(local, radius: float, half_h: float):
+    """Signed distance from a point to a z-aligned cylinder, the point given in its frame.
+
+    Negative inside, and exact. `surface_distance` below is the same quantity *outside* the
+    cylinder and is kept for the cap, where it is all the callers need and where its numbers are
+    on the record from M1 onwards; this one is for the bottle, where a finger sweeping over the
+    shoulder really can end up inside and `surface_distance` would report it as comfortably
+    clear (it squares the radial term, so inside reads positive).
+
+    Plain operators, so this serves the env under `jit` and the CPU scripts alike.
+    """
+    radial = (local[..., 0] ** 2 + local[..., 1] ** 2) ** 0.5 - radius
+    axial = abs(local[..., 2]) - half_h
+    out_r, out_a = radial * (radial > 0), axial * (axial > 0)
+    outside = (out_r ** 2 + out_a ** 2) ** 0.5
+    deepest = radial * (radial > axial) + axial * (radial <= axial)  # max(radial, axial)
+    return outside + deepest * (deepest < 0)
+
+
+def cylinder_gaps(points, geom_radius, geom_pos, geom_mat, radius: float, half_h: float):
+    """Surface-to-surface gaps from a group of geoms to one cylinder, same shape as `points[..., 0]`.
+
+    `points` is (n_geoms, samples, 3) in world coordinates and `geom_radius` is (n_geoms,), as
+    produced by `segment_points`; `geom_pos`/`geom_mat` place the cylinder.
+    """
+    local = (points - geom_pos) @ geom_mat
+    return cylinder_sdf(local, radius, half_h) - geom_radius[:, None]
 
 
 def cap_dimensions(model: mujoco.MjModel) -> tuple[float, float]:

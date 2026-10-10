@@ -17,7 +17,26 @@ from ml_collections import config_dict
 
 # M2/M3: measured by `scripts/check_parity.py --probe` with 2x headroom. `naconmax` is a total
 # across worlds, so it scales with `num_envs`; `njmax` is per world.
-NACONMAX_PER_WORLD = 44
+#
+# M6: 44 -> 64. The M2 figure was measured on the *tripod* pregrasp, and re-running the probe on
+# the re-fitted two-finger pose asks for **46** per world (`ncollision` 23, nacon 4, nefc 41) --
+# so the configured 44 was below the requirement, which would have dropped contacts silently
+# during the run. 64 rather than 46 because the scripted gait is the gentlest loading case in the
+# project and an untrained policy is the harshest: M4 measured -4.5 mm of penetration and an
+# EPA_HORIZON flag under a random policy against the gait's -0.288 mm.
+#
+# M6, after three OOMs: 64 -> 48. The extra buffer does *not* cost "about a gigabyte of the 96
+# available" as first written -- warp's convex narrowphase allocates scratch sized off these
+# buffers on every call (`collision_convex.convex_narrowphase` -> `warp.empty`), and at 64 per
+# world that allocation starts failing mid-run: three runs died in warp with
+# "Failed to allocate 1610612736 bytes" (twice) and "402653184 bytes" (once). M5 ran 91.75M
+# steps at 44 per world without one. 48 is the compromise: above the 46 the re-fitted pose
+# measures, and a total of 393,216 against M5's proven 360,448. `njmax` 150 still clears its
+# measured 82.
+#
+# If 48 still OOMs, the next lever is NOT `num_envs` -- that is a PPO hyperparameter and moving
+# it breaks comparability with the seeds already run -- but warp's mempool release threshold.
+NACONMAX_PER_WORLD = 48
 NJMAX = 150
 
 # M3: the highest measured throughput, and it matches Playground's tuned LeapCubeRotateZAxis
@@ -97,21 +116,99 @@ def default_config() -> config_dict.ConfigDict:
             # one actually on it pays. Checked against the M1 scripted gait, which this term
             # must not punish: -5.3 of return at 100, -0.4 at 500.
             idle_sharpness=500.0,
-            # M5: was 2.0 rad/s (115 deg/s). Success needs 4*pi in 20 s, i.e. 0.63 rad/s, so 2.0
-            # paid for spinning three times faster than the task asks; the flick policy
-            # saturated this clip every step at 4.6 rad/s. 1.0 still leaves 1.6x headroom over
-            # the success rate and the M1 gait only reaches 0.11 rad/s, so nothing legitimate
-            # touches it.
-            rotate_clip=1.0,
+            # M6: `rotate_clip` is gone, and the measurement that removed it is the reason the
+            # whole `twist` term exists. A *per-step rate* clip cannot coexist with a gait,
+            # because a gait is bursty by construction: it turns the cap hard during the twist
+            # phase and not at all while it regrips. Measured on the re-fitted scripted gait
+            # (artifacts/squeeze_twist.npz, +420.5 deg), whose rotation rate is 0.172 rad/s at
+            # the median and 3.811 rad/s at the peak:
+            #
+            #     rotate_clip = 1.0   pays 3.673 of its 7.339 rad   50.1%
+            #     rotate_clip = 0.25  pays 1.251 of its 7.339 rad   17.0%
+            #     no clip             pays 7.339 of its 7.339 rad  100.0%
+            #
+            # A policy that grinds the cap continuously at or below the clip is paid in full, so
+            # the clip was a 2x subsidy to the exploit over the behaviour the project wants --
+            # and tightening it, which is where this started, makes that worse not better. What
+            # bounds progress now is `stroke_budget`, which is a cap on the *total* a single
+            # grip may be paid for and so is indifferent to how bursty the stroke is. For the
+            # same reason there is no angular-velocity cost: at 3.811 rad/s the reference gait
+            # would pay it more than any exploit measured.
+            #
+            # The budget per grip. The scripted gait turns 31-47 deg per cycle (median 34), so
+            # 60 deg leaves its best cycle headroom and never clips it, while a policy that
+            # grips once and grinds is paid for 60 deg and nothing more. Two full turns then
+            # need at least 12 grips, which is what makes "twist it several times" a property
+            # of the physics of the reward rather than a term asking for cycles directly.
+            stroke_budget=float(np.pi / 3.0),  # 60 deg
+            # Hysteresis on `max(thumb_gap, index_gap)` for "a new grip has begun", which is
+            # what refills the budget. Both are read off the reference gait, which has to be
+            # paid in full: across its 12 cycles the grip closes to 0.94-2.83 mm (so 5 mm
+            # registers every one of them) and the release opens to 12.21-18.24 mm (so 11 mm
+            # catches every one, with the thinnest margin 1.2 mm). The 6 mm band between them
+            # is what stops a policy from chattering across the threshold to refill the budget
+            # without really letting go: crossing it costs a genuine 6 mm excursion of the
+            # fingers, which at `action_scale` is several control steps each way -- i.e. a
+            # regrip. Termination still uses `contact_distance`; these two only drive the
+            # budget.
+            grip_engage_gap=0.005,
+            grip_release_gap=0.011,
+            # M6: where the opposition factor saturates, in degrees of azimuth between the two
+            # grasp surfaces. 180 is wrong and the pregrasp fit already measured why: at 180 one
+            # finger has to reach across to the far side of the cap, where the bottle neck is,
+            # and every grip/twist/release combination tried there hits the bottle (NOTES.md,
+            # M5). The fit settled on 150 and the gait it produces sits at 150.2 deg of
+            # opposition at the median -- so the reward now stops paying for more than the pose
+            # can deliver instead of pulling the policy into the neck.
+            opposition_target_deg=150.0,
+            # M6: how close a pinch surface may come to the bottle before it is costed, in
+            # metres. The reference gait's closest approach over 192 steps is 3.41 mm (p1 3.75),
+            # so 2 mm is clear of it by 1.4 mm and the term is exactly zero on the trajectory it
+            # must not punish. Inside the margin it ramps linearly and keeps going past contact,
+            # since `cylinder_sdf` is signed: penetrating the bottle costs more than touching
+            # it. Bounded at 5 so a bad early step cannot dominate the return.
+            bottle_margin=0.002,
+            # M6: the one remaining clip, and it only bounds a *cost*. Backward rotation is
+            # charged at the rate it happens so that losing ground is strictly worse than
+            # idling; this stops a numerical lurch from dominating an episode. Far past
+            # anything physical -- the reference gait's fastest forward step is 3.811 rad/s.
+            backdrive_clip=5.0,
             # PRD weights, with the sign of each cost moved from its definition into the weight
             # so the logged `reward/*` metrics read as signed contributions.
             scales=config_dict.create(
-                rotate=1.0,
-                # M5: 0.5 -> 0.15. At the pregrasp pose the old `reach` was 99.9% of the
+                # M6: replaces `rotate`, which paid for cap rotation however it was produced.
+                # `rotate` and `grasp` were *added*, so turning the cap badly and holding it
+                # well were alternatives the policy could choose between, and the arithmetic
+                # said to turn it badly: at 1200 steps an exploit grinding past the old clip
+                # returned 60.0 against 54.9 for the scripted gait, and NOTES.md M5 records
+                # every seed duly finding the exploit. `twist` is the product instead --
+                # rotation is only paid while the pinch is actually closed, and only up to
+                # `stroke_budget` per grip. A one-sided grinder is paid for 60 deg of its 4600;
+                # the only way to be paid for more is to let go and take another stroke.
+                twist=1.0,
+                # M6: the pinch is the gate on `twist`, and it stays a dense term of its own so
+                # that a policy starting from the pregrasp pose has a gradient to follow before
+                # it has ever turned the cap -- which is the one real risk of gating rotation.
+                # 0.5 -> 0.15 at M5: at the pregrasp pose the old `reach` was 99.9% of the
                 # signal and parking for a whole episode returned 8.93 against ~21 for
-                # succeeding. With the sharper, opposition-gated term and this weight, parking
-                # returns ~1.2 against ~14 for succeeding.
+                # succeeding. Parking now returns ~9 against ~35 for gaiting.
                 grasp=0.15,
+                # M6: rotation the pinch did not produce. `(1 - pinch) * |d_theta|`, so a cap
+                # spun by a knuckle or flicked loose is charged for the whole of it while a
+                # clean pinch is charged for almost none. With `twist` at 1.0 the two cancel at
+                # `pinch = 0.2`: below that, turning the cap is worth less than leaving it
+                # alone. The reference gait pays about -3.3 of return here against +31 of
+                # `twist`; the recorded exploits pay about -20 against nothing.
+                slip=-0.25,
+                # M6: losing ground, charged at the rate it happens and unclipped up to
+                # `backdrive_clip`. The old `rotate` term clipped its own downside at -0.5 while
+                # paying up to +1.0, which made a cap shaken symmetrically back and forth worth
+                # +0.5 a cycle. Nothing was ever observed doing it -- but the reward paid for it.
+                backdrive=-1.0,
+                # M6: a pinch surface inside the bottle's margin. Nothing costed this before,
+                # and all three of the high-rotation recorded policies drive their grasp geoms
+                # into the bottle. The 150 deg opposition target is the other half of the fix.
+                bottle=-0.05,
                 # M5: the cost that makes the pinch two-fingered. `grasp` says what must touch
                 # the cap; without this nothing says what must not, and `rotate` quietly pays
                 # the middle finger to help turn it. Scaled so that all three idle tips in full
@@ -122,7 +219,12 @@ def default_config() -> config_dict.ConfigDict:
                 action_rate=-0.01,
                 torques=-1e-3,
                 joint_vel=-1e-4,
-                success=10.0,
+                # M6: 10.0 -> 100.0. At 10.0 the one-time bonus was worth 0.5 of return
+                # (10.0 * ctrl_dt) against ~31 for the dense term over a 1200-step episode --
+                # 1.6%, which shapes nothing, and NOTES.md listed it as an open question. At
+                # 100.0 it is 5.0, i.e. the last 60 deg before 4*pi is worth about two extra
+                # strokes. Still a tie-breaker rather than the objective.
+                success=100.0,
             ),
         ),
         # M2: `impl='jax'` cannot load this scene at all (no cylinder/mesh collisions), so warp
