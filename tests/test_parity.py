@@ -88,7 +88,12 @@ def test_dynamics_are_not_chaotic(trajectory, reference):
 
     data = mujoco.MjData(model)
     data.qpos[:] = np.array(key.qpos)
-    data.qpos[:24] += 1e-5 * rng.standard_normal(24)
+    # M7: derived, not the literal 24. Adding the forearm roll at qpos 0 shifted every address,
+    # so `qpos[:24]` quietly became "the roll plus 23 of the 24 finger joints" -- still passing,
+    # still perturbing, no longer the thing the test says it does.
+    hand = [int(model.jnt_qposadr[j]) for j in range(model.njnt)
+            if model.joint(j).name.startswith("rh_")]
+    data.qpos[hand] += 1e-5 * rng.standard_normal(len(hand))
     data.ctrl[:] = key.ctrl
     for u in ctrl:
         for _ in range(n_substeps):

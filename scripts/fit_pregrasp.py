@@ -75,6 +75,26 @@ IDLE_RADIUS = 0.030  # keep ring/little tips at least this far off the cap axis 
 TIP_OPPOSITION = 2.60  # target azimuthal separation between the two pinch tips [rad]
 IK_MARGIN = 0.01  # temporary geom margin, so near-contacts are visible to the fitter [m]
 
+# M7: the pregrasp belongs at the *top* of the usable roll range. The stroke runs 0 -> -90 deg,
+# so a pose fitted at -45 would throw away half of it. Pinned rather than bounded, because the
+# optimiser has every incentive to buy clearance by starting part-way through the stroke.
+ROLL_NEUTRAL = 0.0
+# M7: and the pinch is biased into the cap's *upper* half rather than centred on its mid-plane.
+#
+# The first pronation gait brushed the bottle on 91 of 220 steps, always `rh_ffdistal` against
+# the neck. It is not a roll-range problem -- every static pose from -90 to 0 is clean at every
+# grip -- and it is not fixed by a lighter grip. The cause is height: the neck is a sleeve
+# running up *inside* the cap, with 24 mm of it exposed below the cap's bottom rim, and the M5
+# pose puts the tips at cap-frame z = -3.0 and -4.3 mm, 3-5 mm above that rim. Rolling swings
+# the finger down over the lip and onto the neck.
+#
+# A roll-sweep clearance penalty was tried first and is *not* kept: applying BODY_CLEARANCE at
+# three extra angles outweighed the pinch terms, and the optimiser bought clearance by leaving
+# the cap altogether (tips 30+ mm off the surface, 40 mm out of the axial band). It also
+# constrained the wrong pose -- the collision happens when gripped, and the fitter only ever
+# sees the ungripped pregrasp. Biasing the height attacks the measured cause instead.
+AXIAL_TARGET = 0.003  # keep the pinch this far above the cap mid-plane [m]
+
 
 # --------------------------------------------------------------------------------------
 # small geometry helpers
@@ -151,6 +171,13 @@ class PregraspFitter:
         self.cap_centre = np.array(m.body("cap").pos) + np.array(m.body("bottle").pos)
         self.cap_qadr = int(m.joint("cap_hinge").qposadr[0])
         self.bottle_geoms = {m.geom("bottle_body").id, m.geom("bottle_neck").id}
+        # M7: the forearm roll, resolved by name. It is pinned at the pregrasp and swept for
+        # clearance -- see ROLL_SWEEP.
+        self.roll_act = int(m.actuator("rh_A_WRJ0").id)
+        self.roll_qid = int(m.joint("rh_WRJ0").qposadr[0])
+        self._hand_qadrs = [
+            int(m.jnt_qposadr[j]) for j in range(m.njnt) if m.joint(j).name.startswith("rh_")
+        ]
 
         self.a2q = actuator_to_qpos_map(m)
         self.lo, self.hi = m.actuator_ctrlrange.T.copy()
@@ -205,16 +232,33 @@ class PregraspFitter:
 
     def seed_params(self) -> np.ndarray:
         text = MENAGERIE_KEYFRAMES.read_text()
-        q = np.array(
+        seed = np.array(
             [float(x) for x in re.search(r'name="grasp sphere" qpos="([^"]+)"', text).group(1).split()]
         )
+        # M7: the seed keyframe is Menagerie's, for the hand *without* the forearm roll, so its
+        # values are positional against a 24-joint model and this one has 25. Scatter them onto
+        # the addresses they belong to rather than assuming the vectors line up -- adding a
+        # joint at qpos 0 shifted every one of them, and indexing straight through silently read
+        # the wrong joint before it ran off the end.
+        q = np.zeros(self.model.nq)
+        targets = [a for a in sorted(self._hand_qadrs) if a != self.roll_qid]
+        if len(targets) != len(seed):
+            raise ValueError(
+                f"the Menagerie seed has {len(seed)} joints and this model has {len(targets)} "
+                "besides the forearm roll; the seed keyframe needs revisiting"
+            )
+        q[targets] = seed
+        q[self.roll_qid] = ROLL_NEUTRAL
         u = np.array([sum(s * q[adr] for adr, s in pairs) for pairs in self.a2q])
         return np.concatenate([self.seed_pos, np.zeros(3), np.clip(u, self.lo, self.hi)])
 
     def bounds(self) -> list[tuple[float, float]]:
         b = [(p - 0.08, p + 0.08) for p in self.seed_pos]
         b += [(-0.7, 0.7)] * 3
-        b += list(zip(self.lo, self.hi))
+        limits = list(zip(self.lo, self.hi))
+        # M7: the forearm roll is not a free parameter. The pregrasp is the start of a stroke.
+        limits[self.roll_act] = (ROLL_NEUTRAL, ROLL_NEUTRAL)
+        b += limits
         return b
 
     # -- forward kinematics ------------------------------------------------------------
@@ -248,7 +292,7 @@ class PregraspFitter:
     def cost(self, x: np.ndarray, settle_steps: int = 0) -> float:
         self.place(x, settle_steps)
         d = self.data
-        c, R, H = self.cap_centre, self.cap_radius, self.cap_half_h
+        c, R = self.cap_centre, self.cap_radius
         total = 0.0
 
         tips = np.array([d.site(t).xpos for t in GAIT_TIPS]) - c
@@ -262,7 +306,9 @@ class PregraspFitter:
         # 0.18 mm off the cap -- pre-loaded, unable to squeeze, and failing
         # `test_pregrasp_leaves_room_to_squeeze`. The floor has to outrank the opposition term.
         total += 5e8 * np.sum(np.maximum(0.0, (R + MIN_STANDOFF) - radial) ** 2)
-        total += 1e6 * np.sum(np.maximum(0.0, np.abs(tips[:, 2]) - AXIAL_BAND) ** 2)
+        total += 1e6 * np.sum(
+            np.maximum(0.0, np.abs(tips[:, 2] - AXIAL_TARGET) - AXIAL_BAND) ** 2
+        )
 
         az = np.arctan2(tips[:, 1], tips[:, 0])
         sep = abs(np.arctan2(np.sin(az[0] - az[1]), np.cos(az[0] - az[1])))

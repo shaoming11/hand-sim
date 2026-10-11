@@ -2378,12 +2378,60 @@ puts the pinch low enough that rolling rides the index finger onto the neck. The
 costs the gait only -0.01, so it is not distorting the reward yet, but the pose wants re-fitting
 before any of this is trained.
 
+### The pregrasp re-fit: attempted, not landed
+
+`fit_pregrasp.py` is updated for the new joint and is correct; the *pose* is not re-fitted and
+the committed one is still the M5 fit. What changed, and what did not:
+
+**Fixed, and necessary.** The Menagerie seed keyframe is for the 24-joint hand, and the fitter
+indexed straight through it into a 25-joint model -- reading the wrong joint for every actuator
+before running off the end. It now scatters the seed onto addresses resolved from the model.
+`ROLL_NEUTRAL` pins the roll to 0 in the bounds, because the pregrasp is the *start* of a stroke
+and an optimiser left free would buy clearance by starting part-way through it.
+
+**Tried and reverted: a roll-sweep clearance penalty.** Checking bottle clearance at 0/-30/-60/-90
+deg looked like the direct fix. It is not: applying `BODY_CLEARANCE` at three extra angles
+outweighs the pinch terms, and the optimiser buys clearance by leaving the cap altogether (tips
+30+ mm off the surface, 40 mm out of the axial band, cost 2635 against a good fit's ~40). It
+also constrains the wrong pose -- the collision happens *gripped*, and the fitter only ever sees
+the ungripped pregrasp.
+
+**Kept: `AXIAL_TARGET = 3 mm`,** biasing the pinch into the cap's upper half. This attacks the
+measured cause. The neck is a sleeve running up inside the cap with 24 mm exposed below its
+bottom rim, and the M5 pose puts the tips at z = -3.0 and -4.3 mm, 3-5 mm above that rim, so
+rolling swings the index finger over the lip. Swept with everything else held fixed, the bias
+monotonically improves the fit:
+
+| `AXIAL_TARGET` | cost | separation | thumb z / r | index z / r |
+|---|---|---|---|---|
+| 0.0 mm | 153.0 | 149.1 deg | +10.8 / 18.6 | -10.3 / 26.8 |
+| 1.5 mm | 49.2 | 148.7 | +9.4 / 20.3 | -5.9 / 21.0 |
+| **3.0 mm** | **41.4** | 149.0 | +8.9 / 20.6 | -1.3 / 22.9 |
+
+**Why it is not landed: the search is high-variance and every fresh pose is worse than the
+committed one.** All three above leave the thumb ~9 mm up, outside the cap's 8 mm half-height,
+and a 12-restart run found z = +16.9 / -14.1, *worse* than this 8-restart sweep. The kinematics
+at roll 0 are identical to the pre-M7 model, so the M5 pose is still reachable -- the optimiser
+is simply not finding it from the Menagerie seed. The fix is to seed the search from the
+committed pose and refine, rather than rediscover it; that is not done.
+
+**And a measurement trap found while comparing them, worth recording.** `cost(x)` without
+`settle_steps` maps actuator *targets* straight to qpos, while the committed keyframe stores the
+*settled* pose. Scoring the committed pose that way reads 8831 against a fresh fit's 41 -- an
+artifact of comparing targets with geometry, not a real gap. The tell is the index finger
+reading r = 13.9 mm, inside the 16 mm cap, where the settled pose actually sits 3.4 mm clear.
+Any pose comparison has to settle both sides.
+
+**This is not blocking.** The neck contact costs the roll gait -0.01 of return, so it is not
+distorting the reward, and the gait itself is clean otherwise (+617 deg in 11 s, 95.7%
+roll-tracked, -0.089 mm penetration). It is a tidiness item, not a correctness one.
+
 Still to do, in order:
 
-1. **Re-fit the pregrasp** with roll free, which should also clear the neck contact above.
-2. **Re-probe buffers and parity** -- `check_parity.py --probe` after a geometry change, which
+1. **Re-probe buffers and parity** -- `check_parity.py --probe` after a geometry change, which
    M6 learned the hard way.
-3. **Retrain three seeds.** Nothing from M6 transfers: the action is 21-dim and the frame 73.
+2. **Retrain three seeds.** Nothing from M6 transfers: the action is 21-dim and the frame 73.
+3. **Re-fit the pregrasp**, seeded from the committed pose, when it is worth the time.
 
 ---
 
