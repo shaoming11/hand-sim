@@ -2426,12 +2426,40 @@ Any pose comparison has to settle both sides.
 distorting the reward, and the gait itself is clean otherwise (+617 deg in 11 s, 95.7%
 roll-tracked, -0.089 mm penetration). It is a tidiness item, not a correctness one.
 
+### Buffers and parity after the joint, re-probed
+
+M6 learned not to skip this: its `naconmax` had been measured on a pose that no longer existed
+and was under the requirement for a whole milestone. Probed on both reference trajectories,
+since a probe is only as good as the trajectory it replays:
+
+| | finger gait | **roll gait** | configured |
+|---|---|---|---|
+| `ncollision` max | 23 | **18** | -- |
+| `nefc` max | 42 | **49** | -- |
+| `naconmax` / world at 2x | 46 | **36** | 48 |
+| `njmax` / world at 2x | 84 | **98** | 150 |
+
+The roll gait needs *fewer* contact slots and *more* constraint rows: the pinch is tighter so
+the hand sweeps less geometry, but a firmer grip puts more rows in the solver. Both are inside
+the configured sizes, so nothing changes -- but note the direction, because an untrained policy
+grips harder than a scripted one and `njmax` has only 1.5x of headroom over the roll gait where
+it had 1.8x over the finger gait.
+
+Parity on the roll gait is **0.16%** (CPU +617.35 deg against warp +618.33), no overflow flags,
+solver using 6 of 50 iterations. `artifacts/roll_gait.npz` is saved alongside
+`squeeze_twist.npz` so both can be replayed.
+
 Still to do, in order:
 
-1. **Re-probe buffers and parity** -- `check_parity.py --probe` after a geometry change, which
-   M6 learned the hard way.
-2. **Retrain three seeds.** Nothing from M6 transfers: the action is 21-dim and the frame 73.
-3. **Re-fit the pregrasp**, seeded from the committed pose, when it is worth the time.
+1. **Retrain three seeds.** Nothing from M6 transfers: the action is 21-dim and the frame 73.
+2. **Re-fit the pregrasp**, seeded from the committed pose, when it is worth the time.
+
+One number worth beating, from watching the gait rather than scoring it: in steady state the cap
+turns **58.6 deg per 90 deg of roll**, a ratio of 0.65, where a single stroke from the settled
+pregrasp manages 0.93. The grip slips as it re-establishes each cycle. The reward treats that
+correctly -- under-turning is not charged, only turning *more* than the roll explains -- but a
+policy should do better than the script here, and the gap is a reasonable thing to watch during
+training.
 
 ---
 
