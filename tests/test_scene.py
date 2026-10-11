@@ -27,11 +27,22 @@ def scene():
 
 def test_scene_loads_with_expected_shape(scene):
     model, _ = scene
-    assert model.nu == 20, "20 position actuators"
-    assert model.nq == 25, "24 hand joints + 1 cap hinge"
-    assert model.njnt == 25
+    # M7: 20 -> 21 and 25 -> 26. `rh_WRJ0` is the forearm roll -- pronation, the joint a person
+    # actually unscrews a cap with, and the one Menagerie's hand does not have. NOTES.md, M6.
+    assert model.nu == 21, "20 position actuators + the forearm roll"
+    assert model.nq == 26, "25 hand joints + 1 cap hinge"
+    assert model.njnt == 26
     assert model.body("rh_forearm").parentid[0] == 0, "forearm hangs off the world"
-    assert model.body("rh_forearm").jntnum[0] == 0, "forearm has no joint, so the base is fixed"
+    assert model.body("rh_forearm").jntnum[0] == 1, "the forearm's one joint is the roll"
+    roll = model.joint("rh_WRJ0")
+    assert roll.type[0] == mujoco.mjtJoint.mjJNT_HINGE
+    assert abs(roll.axis[2]) == 1.0 and roll.axis[0] == 0.0 and roll.axis[1] == 0.0, (
+        "pronation is about the forearm's own long axis, which is local z here"
+    )
+    # The range is load-bearing, not cosmetic: 4*pi of cap rotation cannot be reached in fewer
+    # than ceil(4*pi / (2 * 1.3963)) = 5 strokes, so releasing and regripping is enforced by the
+    # geometry rather than by a reward term.
+    assert float(roll.range[1] - roll.range[0]) < 2 * 3.15, "a full turn must not fit in one roll"
     assert model.body("bottle").jntnum[0] == 0, "bottle is fixed in place"
     assert model.joint("cap_hinge").type[0] == mujoco.mjtJoint.mjJNT_HINGE
 
@@ -42,7 +53,7 @@ def test_cap_is_the_only_moving_object(scene):
     hand_dofs = [
         model.jnt_dofadr[j] for j in range(model.njnt) if model.joint(j).name.startswith("rh_")
     ]
-    assert len(hand_dofs) == 24
+    assert len(hand_dofs) == 25  # M7: + rh_WRJ0
     assert sorted(hand_dofs + cap_dofs) == list(range(model.nv))
 
 

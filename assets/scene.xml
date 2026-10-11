@@ -141,9 +141,13 @@
   </sensor>
 
   <keyframe>
-    <!-- PREGRASP: fitted by scripts/fit_pregrasp.py. Do not hand-edit. -->
+    <!-- PREGRASP: fitted by scripts/fit_pregrasp.py. Do not hand-edit.
+         M7: the leading 0 of each vector is `rh_WRJ0`, the new forearm roll, at neutral.
+         It is first because the joint is declared on `rh_forearm`, the root body, so it
+         leads both qpos and ctrl. The rest of the pose is the M5 fit, unchanged -- but it
+         was fitted with the forearm welded, so it wants re-fitting now that roll is free. -->
     <key name="pregrasp"
-      qpos="-0.328493 -0.543086 -0.14896 0.928733 0.460996 0.580381 -0.0411121 1.11253 0.658811 0.685525 0.0757312 1.00632 1.07141 1.10541 0.24367 -0.227797 0.951689 0.333209 0.344181 -0.104145 0.630163 0.0927803 0.320838 0.181386 0"
-      ctrl="-0.309657 -0.556314 -0.100346 0.625193 0.0910642 0.322963 0.182416 -0.198183 0.969276 1.04296 -0.0380464 1.11979 1.35051 0.0727986 1.01262 2.18328 0.214212 -0.233883 0.953308 0.680486"/>
+      qpos="0 -0.328493 -0.543086 -0.14896 0.928733 0.460996 0.580381 -0.0411121 1.11253 0.658811 0.685525 0.0757312 1.00632 1.07141 1.10541 0.24367 -0.227797 0.951689 0.333209 0.344181 -0.104145 0.630163 0.0927803 0.320838 0.181386 0"
+      ctrl="0 -0.309657 -0.556314 -0.100346 0.625193 0.0910642 0.322963 0.182416 -0.198183 0.969276 1.04296 -0.0380464 1.11979 1.35051 0.0727986 1.01262 2.18328 0.214212 -0.233883 0.953308 0.680486"/>
   </keyframe>
 </mujoco>

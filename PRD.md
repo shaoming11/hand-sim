@@ -15,7 +15,7 @@ Do not revisit these without asking.
 
 | Topic | Decision |
 |---|---|
-| Hand | Shadow Hand (right) from `mujoco_menagerie`. Base fixed in the air. Wrist and fingers move (20 position actuators, 24 joints). |
+| Hand | Shadow Hand (right) from `mujoco_menagerie`. Base fixed in the air except for forearm roll. Wrist and fingers move (21 position actuators, 25 joints). |
 | Bottle | Fixed in place, as if a person is holding it. No free joint, no table. |
 | Cap | Only moving object. One hinge about the bottle axis. No thread model. |
 | Cap state | "Already cracked open": running friction only, not the sealed breakaway torque. |
@@ -178,11 +178,24 @@ angular-velocity cost: both punish the reference gait harder than any measured e
 `tests/test_reward_ranking.py` pins the ordering, so this is checkable before a GPU run rather
 than after one. See NOTES.md, M6.
 
-**Not revised, and worth stating plainly:** a person unscrews a cap with forearm pronation, and
-this hand has none — `rh_forearm` is fixed and the wrist only flexes and deviates. The task as
-specified is therefore finger-gaited in-hand rotation, and M6 shapes the grasp, the stroke and
-the cadence of the human motion but not its actuation. Adding a forearm roll DoF would change
-the "base fixed in the air" decision above and is left for you to call.
+**M7 revision: the forearm rolls.** M6 shaped the grasp, the stroke and the cadence of the human
+motion but not its actuation — a person unscrews a cap with forearm pronation, and this hand had
+none, so the twist had to come from the fingers. The rendered M6 rollout makes the consequence
+plain: a correct thumb-index lateral pinch releasing and regripping 132 times an episode, at
+273 deg/s, which is a motion no hand makes. So `rh_forearm` now carries one joint to the world,
+`rh_WRJ0`, a hinge about its own long axis, range -90 deg to +10 (measured: the hand fouls the
+bottle from +15 on). This revises "Base fixed in the air" above.
+
+An 80 deg roll turns the cap +74 deg net of the grip-ramp baseline — a cap/roll ratio of 0.93,
+i.e. a non-slipping grip — and one 90 deg stroke turns it +98.5 deg, so two full turns need
+about ten strokes instead of the finger gait's ~21. The roll limit therefore enforces the
+release-and-regrip cycle *geometrically*, which means `stroke_budget` and the proposed cadence
+refractory both come out: they were inventions to force a cycle the hardware now requires.
+
+Costs, stated plainly: the action is 21-dim and the observation layout changes, so no M6
+checkpoint loads and all three seeds need retraining; the pregrasp wants re-fitting with roll
+free; buffers and parity want re-probing. And the task is easier — if hard in-hand finger
+gaiting was part of the interest, that is the part this removes. See NOTES.md, M7.
 
 **Termination.** NaN in qpos or qvel. All gaiting fingertips more than 10 cm from the cap, or the grasp lost for `grasp_grace_steps` consecutive steps. Otherwise fixed length.
 

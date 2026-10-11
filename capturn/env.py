@@ -114,8 +114,13 @@ from mujoco_playground._src import mjx_env
 from capturn import scene
 from capturn.config import default_config
 
-N_HAND_JOINTS = 24
-N_ACTUATORS = 20
+# M7: 24 -> 25 and 20 -> 21. `rh_WRJ0`, the forearm roll, is the pronation a person actually
+# unscrews a cap with; Menagerie's hand stops at the wrist and M6 measured what that costs
+# (NOTES.md, M6 -- the twist had to come from the fingers, so every policy drove the cap at
+# 110-270 deg/s with a motion no hand makes). The joint is declared on `rh_forearm`, the root
+# body, so it leads both qpos and ctrl.
+N_HAND_JOINTS = 25
+N_ACTUATORS = 21
 # Zeros in the nominal phase. Sized for the eight model-level scalars in the PRD's DR table plus
 # the bottle's 3-vector offset and its tilt: fingertip friction, cap friction, cap frictionloss,
 # cap damping, actuator gain, hand damping, hand frictionloss, hand armature, bottle_pos (3),

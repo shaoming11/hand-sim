@@ -79,7 +79,8 @@ def test_observation_shapes_are_fixed_and_match_the_documented_layout(env):
     }
     # the frame is the PRD's actor observation, nothing more
     assert FRAME_SIZE == N_HAND_JOINTS + 2 * N_ACTUATORS + 3 + 3
-    assert sizes["state"] == (210,) and sizes["privileged_state"] == (283,)
+    # M7: 210 -> 219 and 283 -> 294, from the extra joint and actuator (frame 70 -> 73).
+    assert sizes["state"] == (219,) and sizes["privileged_state"] == (294,)
 
 
 def test_privileged_state_contains_the_actor_history_verbatim(env):

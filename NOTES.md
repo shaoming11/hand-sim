@@ -2248,6 +2248,99 @@ Deliberately out of scope, in the order worth doing them:
 
 ---
 
+## M7 — forearm pronation
+
+The PRD's "base fixed in the air" is revised: `rh_forearm` now carries one joint to the world,
+`rh_WRJ0`, a hinge about its own long axis. This is the change M6 named and did not make --
+"point 1 is not available in this scene" -- and the reason for making it is that M6 produced a
+correct human *grasp* driven by a motion no human makes. The rendered seed-3 rollout shows a
+genuine thumb-index lateral pinch releasing and regripping 132 times, at 273 deg/s, because
+finger-rolling was the only mechanism the hand had.
+
+### The joint
+
+| | |
+|---|---|
+| axis | forearm local z -- `rh_wrist` sits at (0.01, 0, 0.213) in that frame and the inertia tensor's small principal moment is the third |
+| range | **-90 deg to +10 deg**, measured (below) |
+| actuator | `rh_A_WRJ0`, position, kp 20, forcerange +-10 N*m (human pronation torque is 5-10 N*m) |
+| armature | 0.001 against the forearm's own 0.00744 kg*m^2 about z -- a plausible geared rotor |
+
+It is declared on the root body, so it **leads both `qpos` and `ctrl`**. `N_HAND_JOINTS` 24 -> 25,
+`N_ACTUATORS` 20 -> 21, the actor frame 70 -> 73, `state` (210,) -> (219,), `privileged_state`
+(283,) -> (294,). Every M6 checkpoint is therefore unloadable and all three seeds need retraining.
+
+**A trap worth recording: MuJoCo zero-*pads* a short keyframe rather than erroring.** Adding the
+joint left `scene.xml`'s `pregrasp` with 25 qpos against 26 slots, and the compiler silently
+appended a zero -- so `rh_WRJ0` took `rh_WRJ2`'s -0.328, every value shifted one slot, and the
+pose was quietly wrong while the model loaded fine. The fix is a leading 0 in both vectors. Check
+`m.keyframe(k).qpos[joint.qposadr]` against the joint you expect after any joint is added.
+
+### The range is asymmetric, and measured
+
+Holding the pinch closed (grip 0.35) and settling at each roll angle:
+
+| roll | -90 | -75 | -60 | -45 | -30 | -15 | 0 | +15 | +30 | +45 | +60 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| bottle contacts | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** | 1 | 1 | 2 |
+| penetration mm | -0.073 | -0.079 | -0.078 | -0.081 | -0.085 | -0.085 | -0.085 | -0.082 | -0.086 | -0.081 | **-0.144** |
+
+Clean from -90 to 0; the hand starts catching the bottle from +15 on. A symmetric +-80 deg --
+the obvious first guess, and what was tried -- is wrong in both directions: 80 deg of it is
+unreachable and it clips 10 deg of good travel. The pregrasp sits at roll 0, which is the top of
+the usable band, so a full stroke is available from the start state without re-fitting the pose.
+
+### Feasibility: the roll turns the cap, and the grip it needs is not the one the fingers wanted
+
+M1's question, for pronation. Ramp the pinch closed, then roll:
+
+| case | cap deg | roll deg | pen mm | bottle |
+|---|---|---|---|---|
+| grip 0.50, **no roll** (control) | +30.0 | 0.2 | -0.089 | 0 |
+| grip 0.50, roll 0 -> -80 | **+103.8** | -79.6 | -0.089 | 0 |
+| grip 0.50, roll +80 -> -80 | +138.0 | -160.0 | **-3.802** | **57** |
+
+The control matters: closing the pinch *by itself* drags the cap 30 deg, so the roll's own
+contribution is **+74 deg for 80 deg of roll** -- a cap/roll ratio of **0.93**, which is what a
+non-slipping grip should give. The mechanism works, first try.
+
+At the final -90 deg range, one stroke:
+
+| grip | cap deg | pen mm | bottle | strokes for 4*pi |
+|---|---|---|---|---|
+| 0.35 | **+10.7** | -0.082 | 0 | -- (the grip slips) |
+| **0.50** | **+98.5** | -0.088 | 0 | **10.5** |
+
+**Pronation needs a firmer grip than the finger gait did, and this inverts an M5 finding.** M5
+settled on grip 0.35 for the opposed pose and recorded that "everything at grip >= 0.5 hits the
+bottle". That was true of the *finger* gait; rolling is a different motion and 0.50 is clean
+here. At 0.35 the pinch cannot carry the cap through the roll at all -- 10.7 deg out of a
+possible 98. Any reward term calibrated on the finger gait's grip is calibrated for slip under
+pronation.
+
+Ten strokes for two turns, against the finger gait's ~21, by the mechanism a person uses.
+
+### What this supersedes, and what is still to do
+
+`stroke_budget` and the cadence refractory were both inventions to force a release-and-regrip
+cycle that the hardware did not require. The -90 deg limit now enforces it physically: one
+stroke is ~90 deg of cap rotation and 4*pi needs about ten of them. Both reward devices should
+come out rather than stack on top of a geometric constraint that does the same job better.
+
+Still to do, in order:
+
+1. **A no-slip term.** Nothing yet requires the *roll* to do the turning -- a policy could ignore
+   `rh_WRJ0` and finger-roll exactly as M6 did. Pay rotation to the extent the cap turns *with*
+   the hand (`d_theta_cap ~ d_roll` while gripped) and charge the mismatch. The 0.93 ratio
+   measured above is the target the term should be written against.
+2. **Remove `stroke_budget`** and the `strokes` machinery it needs -- including the metric that
+   NOTES M6 records as undercounting by ~40%, which this removes rather than fixes.
+3. **Re-fit the pregrasp** with roll free; the current pose is the M5 fit, made with the forearm
+   welded.
+4. **Re-probe buffers and parity**, then retrain three seeds. Nothing from M6 transfers.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
