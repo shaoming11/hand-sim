@@ -171,6 +171,9 @@ class CapTurn(mjx_env.MjxEnv):
         self._hand_qids = mjx_env.get_qpos_ids(m, hand_joints)
         self._hand_dqids = mjx_env.get_qvel_ids(m, hand_joints)
         self._cap_qid = int(m.joint(scene.CAP_JOINT).qposadr[0])
+        # M7: the forearm roll. Read by name, like everything else here -- it is qpos 0 today
+        # because the joint is declared on the root body, and that is not worth relying on.
+        self._roll_qid = int(m.joint(scene.ROLL_JOINT).qposadr[0])
 
         limits = np.array([m.joint(j).range for j in hand_joints], dtype=float)
         unlimited = np.array([not m.joint(j).limited for j in hand_joints], dtype=bool)
@@ -278,13 +281,11 @@ class CapTurn(mjx_env.MjxEnv):
             "action_buffer": jp.zeros((self._buffer_len, N_ACTUATORS)),
             "last_cap_angle": cap_angle,
             "ungrasped_steps": jp.zeros((), dtype=jp.int32),
-            # M6: the grip state machine behind the stroke budget. Both evolve during an
-            # episode, so both are stale for one step under `full_reset=False` -- same class as
-            # `last_cap_angle` above, and with a bounded cost: a stale `grip_angle_start`
-            # withholds at most `stroke_budget` of pay until the next regrip refills it.
-            # `ppo_config()` asks for `full_reset=True`, where neither arises.
-            "grip_held": jp.zeros((), dtype=bool),
-            "grip_angle_start": cap_angle,
+            # M7: the previous forearm roll, for the finite difference behind `twist`. Evolves
+            # during an episode, so it is stale for one step under `full_reset=False` -- same
+            # class as `last_cap_angle` above, costing at most one step of mispriced twist.
+            # `ppo_config()` asks for `full_reset=True`, where it does not arise.
+            "last_roll": self._init_q[self._roll_qid],
         }
 
         # Every metric here is defined so that *summing it over an episode* is the
@@ -302,12 +303,15 @@ class CapTurn(mjx_env.MjxEnv):
         metrics["index_gap_per_step"] = jp.zeros(())
         metrics["opposition_per_step"] = jp.zeros(())
         metrics["idle_contact_per_step"] = jp.zeros(())
-        # M6: what makes a gait a gait, in three numbers whose episode sums are the quantities
-        # worth reading -- how many strokes the policy took, how many radians of those strokes
-        # the budget actually paid for, and how many radians the cap turned that the pinch did
-        # not produce. `paid_rotation / cap_rotation_abs` near 1 is a gait; near 0 is a grind.
-        metrics["strokes"] = jp.zeros(())
-        metrics["paid_rotation"] = jp.zeros(())
+        # M7: what makes the motion human, in four numbers whose episode sums are the
+        # quantities worth reading. `tracked_rotation / cap_rotation_abs` is the headline --
+        # the fraction of the cap's travel the *forearm* actually drove. Near 1 is a person
+        # unscrewing a cap; near 0 is the M6 policy spinning it with its fingers.
+        # `roll_travel / (2 * range)` is the effective stroke count, which replaces the
+        # `strokes` metric and its ~40% undercount (NOTES.md, M6) rather than fixing it.
+        metrics["tracked_rotation"] = jp.zeros(())
+        metrics["freewheel_rotation"] = jp.zeros(())
+        metrics["roll_travel"] = jp.zeros(())
         metrics["slip_rotation"] = jp.zeros(())
         metrics["pinch_per_step"] = jp.zeros(())
         metrics["bottle_intrusion_per_step"] = jp.zeros(())
@@ -334,7 +338,7 @@ class CapTurn(mjx_env.MjxEnv):
         terms = aux["terms"]
         d_theta, thumb_gap = aux["d_theta"], aux["thumb_gap"]
         index_gap, opposition = aux["index_gap"], aux["opposition"]
-        pinch, paid, bottle = aux["pinch"], aux["paid"], aux["bottle"]
+        pinch, bottle = aux["pinch"], aux["bottle"]
 
         done = self._get_termination(data, info["ungrasped_steps"])
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in terms.items()}
@@ -361,8 +365,9 @@ class CapTurn(mjx_env.MjxEnv):
         state.metrics["index_gap_per_step"] = index_gap
         state.metrics["opposition_per_step"] = opposition
         state.metrics["idle_contact_per_step"] = terms["idle_contact"]
-        state.metrics["strokes"] = aux["new_grip"].astype(float)
-        state.metrics["paid_rotation"] = paid
+        state.metrics["tracked_rotation"] = aux["tracked"]
+        state.metrics["freewheel_rotation"] = aux["freewheel"]
+        state.metrics["roll_travel"] = jp.abs(aux["d_roll"])
         state.metrics["slip_rotation"] = terms["slip"] * self.dt
         state.metrics["pinch_per_step"] = pinch
         state.metrics["bottle_intrusion_per_step"] = bottle
@@ -395,30 +400,26 @@ class CapTurn(mjx_env.MjxEnv):
         thumb_gap, index_gap, opposition, bottle = self.pinch_state(data)
         pinch = self.pinch_quality(thumb_gap, index_gap, opposition)
 
-        # M6: the grip state machine, which is the whole of "twist it several times".
+        # M7: how much of the cap's motion the *forearm* produced. This is what the stroke
+        # budget used to approximate and now does properly.
         #
-        # `twist` pays for rotation only up to `stroke_budget` per grip, and the budget refills
-        # when a *new* grip begins -- so the only way to be paid for two full turns is to take
-        # at least twelve strokes, and a policy that grips once and grinds the cap round is paid
-        # for 60 deg of it however far it gets. Nothing here asks for cycles directly; the
-        # budget makes them the way to score.
+        # With a non-slipping grip and the roll axis near the cap axis, the cap turns with the
+        # hand: measured on this scene, an 80 deg roll moves the cap +74 deg net of the
+        # grip-ramp baseline, a ratio of 0.93. Rolling negative drives the cap positive (the
+        # unscrew direction), so `roll_drive` flips the sign.
         #
-        # Engage and release are hysteretic on the worse of the two gaps, with both thresholds
-        # read off the reference gait (which must be paid in full): it closes to 0.94-2.83 mm
-        # and releases to 12.21-18.24 mm across its twelve cycles. The 6 mm dead band is what
-        # stops a policy refilling the budget by chattering -- crossing it is a real release.
+        # `tracked` is the forward cap rotation the roll accounts for, and it is what `twist`
+        # pays. Everything past it is the fingers spinning the cap -- exactly the M6 behaviour,
+        # where a policy with an excellent pinch turned the cap at 273 deg/s without a roll
+        # joint to turn it with -- and `freewheel` charges for that. `no_slip_ratio` is 1.0
+        # rather than the measured 0.93 so that a better-than-measured grip is never charged.
         worse_gap = jp.maximum(thumb_gap, index_gap)
+        roll = data.qpos[self._roll_qid]
+        d_roll = roll - info["last_roll"]
         rcfg = self._config.reward_config
-        engaged = worse_gap <= rcfg.grip_engage_gap
-        released = worse_gap >= rcfg.grip_release_gap
-        new_grip = engaged & ~info["grip_held"]
-        info["grip_held"] = jp.where(engaged, True, jp.where(released, False, info["grip_held"]))
-        # Updated before the stroke is measured, so a step that begins a grip starts from zero.
-        info["grip_angle_start"] = jp.where(new_grip, cap_angle, info["grip_angle_start"])
-        budget = jp.clip(
-            rcfg.stroke_budget - (cap_angle - info["grip_angle_start"]), 0.0, rcfg.stroke_budget
-        )
-        paid = jp.clip(d_theta, 0.0, budget)
+        roll_drive = jp.maximum(-d_roll * rcfg.no_slip_ratio, 0.0)
+        tracked = jp.clip(d_theta, 0.0, roll_drive)
+        freewheel = jp.maximum(d_theta - roll_drive, 0.0)
 
         # M5: a gait *has* to let go to regrip, so losing contact for an instant is not a
         # failure -- terminating on it would end the M1 gait on 15% of its own steps. What
@@ -428,12 +429,13 @@ class CapTurn(mjx_env.MjxEnv):
         ungrasped = worse_gap > self._config.contact_distance
         info["ungrasped_steps"] = (info["ungrasped_steps"] + 1) * ungrasped
 
-        # Last, because every finite difference above reads the previous value.
+        # Last, because every finite difference above reads the previous values.
         info["last_cap_angle"] = cap_angle
+        info["last_roll"] = roll
 
         return {
             "terms": self._get_reward(
-                data, action, info, d_theta, rotation, pinch, paid, bottle
+                data, action, info, d_theta, rotation, pinch, tracked, freewheel, bottle
             ),
             "cap_angle": cap_angle,
             "d_theta": d_theta,
@@ -443,8 +445,9 @@ class CapTurn(mjx_env.MjxEnv):
             "opposition": opposition,
             "bottle": bottle,
             "pinch": pinch,
-            "paid": paid,
-            "new_grip": new_grip,
+            "tracked": tracked,
+            "freewheel": freewheel,
+            "d_roll": d_roll,
             "cap_angvel": self._cap_angvel(data),
         }
 
@@ -488,7 +491,8 @@ class CapTurn(mjx_env.MjxEnv):
         d_theta: jax.Array,
         rotation: jax.Array,
         pinch: jax.Array,
-        paid: jax.Array,
+        tracked: jax.Array,
+        freewheel: jax.Array,
         bottle: jax.Array,
     ) -> Dict[str, jax.Array]:
         cfg = self._config.reward_config
@@ -509,11 +513,13 @@ class CapTurn(mjx_env.MjxEnv):
             # sits at the clip forever -- so the clip was a subsidy to the exploit, and
             # tightening it would have doubled down. See NOTES.md, M6.
             #
-            # This is the product instead: `pinch` (the grasp term, 0 to 1) times the rotation
-            # the budget allows this grip. Turning the cap without a pinch pays nothing however
-            # fast; holding a pinch without turning pays nothing either; and one grip can be
-            # paid for at most `stroke_budget`.
-            "twist": pinch * paid / self.dt,
+            # M7: the product is now `pinch` (the grasp, 0 to 1) times the rotation the
+            # *forearm roll* accounts for. Three things have to coincide to be paid: the pinch
+            # closed, the hand turning, and the cap going with it. Turning the cap without a
+            # pinch pays nothing however fast; holding a pinch without rolling pays nothing;
+            # and rolling without the cap following pays nothing either. That is the human
+            # motion stated as an identity rather than approximated by a budget.
+            "twist": pinch * tracked / self.dt,
             # M5: replaces `reach`, which measured how close three fingertip *sites* were to the
             # cap and so could not see the grasp the first policy actually used -- the side of
             # the index finger, with the thumb absent. This asks for the real thing: both
@@ -546,6 +552,11 @@ class CapTurn(mjx_env.MjxEnv):
             # turning the cap with worse than a fifth of a grasp is worth less than leaving it
             # alone.
             "slip": (1.0 - pinch) * jp.abs(d_theta) / self.dt,
+            # M7: cap rotation a *held* pinch produced without the forearm. `slip` is blind to
+            # this by construction -- the grip is good, so its `(1 - pinch)` factor is near
+            # zero -- and it is precisely what every M6 policy did. Gated on `pinch` so a cap
+            # free-spinning after release is charged once, by `slip`, rather than twice.
+            "freewheel": pinch * freewheel / self.dt,
             # M6: losing ground. The old `rotate` clipped its downside at -0.5 while paying up
             # to +1.0, so a cap shaken symmetrically back and forth was worth +0.5 a cycle --
             # never observed, but paid for. This is unclipped up to `backdrive_clip`, which only

@@ -287,6 +287,47 @@ class OpenLoopGait:
         }
 
 
+def roll_gait(grip: float = 0.5, cycles: int = 10, roll_to: float = -1.5708,
+              steps: tuple[int, int, int, int] = (4, 10, 2, 6)):
+    """M7: the pronation gait -- grip, roll the forearm, release, roll back. Repeat.
+
+    This is what the M1 `squeeze_twist` gait becomes once the forearm can roll, and it is the
+    reference trajectory M7's reward is scored against. It needs no IK: the fingers hold a fixed
+    pinch and `rh_WRJ0` does the turning, which is the whole point -- the hand keeps its grasp
+    and the *arm* unscrews the cap.
+
+    Note `grip=0.5`, where the finger gait wanted 0.35. A lighter pinch cannot carry the cap
+    through a roll: at 0.35 a 90 deg stroke moves it 10.7 deg against 98.5 at 0.50. NOTES.md, M7.
+
+    Returns `(gait, ctrl, result)` like `run`, so the two are interchangeable to a caller.
+    """
+    gait = OpenLoopGait(["th", "ff"], use_wrist=False)
+    m = gait.model
+    roll_a = m.actuator("rh_A_WRJ0").id
+    squeeze, roll_n, release, back = steps
+    per = squeeze + roll_n + release + back
+
+    offset = gait.grip_offset(grip)
+    ctrl = np.tile(gait.u0, (cycles * per, 1))
+    for c in range(cycles):
+        base = c * per
+        for i in range(per):
+            t = base + i
+            if i < squeeze:                                   # close the pinch, hand at 0
+                hold, turn = ease((i + 1) / squeeze), 0.0
+            elif i < squeeze + roll_n:                        # gripped: the forearm turns
+                hold, turn = 1.0, ease((i - squeeze + 1) / roll_n)
+            elif i < squeeze + roll_n + release:              # let go, hand still rolled over
+                hold, turn = 1.0 - ease((i - squeeze - roll_n + 1) / release), 1.0
+            else:                                             # open hand rolls back for another
+                hold = 0.0
+                turn = 1.0 - ease((i - squeeze - roll_n - release + 1) / back)
+            ctrl[t] = gait.u0 + hold * offset
+            ctrl[t, roll_a] = roll_to * turn
+    ctrl = np.clip(ctrl, gait.lo, gait.hi)
+    return gait, ctrl, gait.rollout(ctrl)
+
+
 def run(fingers, grip, twist, release, cycles, use_wrist, grip_z=0.0, steps=(4, 6, 2, 4)):
     gait = OpenLoopGait(fingers, use_wrist=use_wrist)
     path, envelope = gait.plan(twist, release, cycles, grip_z, steps)

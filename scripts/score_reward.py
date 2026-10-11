@@ -138,8 +138,7 @@ def score(env: CapTurn, traj: dict) -> dict:
         "cap_angle_init": jp.array(traj["qpos"][0][cap_qid]),
         "last_cap_angle": jp.array(traj["qpos"][0][cap_qid]),
         "last_act": jp.zeros(env.action_size),
-        "grip_held": jp.zeros((), dtype=bool),
-        "grip_angle_start": jp.array(traj["qpos"][0][cap_qid]),
+        "last_roll": jp.array(traj["qpos"][0][env._roll_qid]),
         "ungrasped_steps": jp.zeros((), dtype=jp.int32),
     }
 
@@ -156,9 +155,9 @@ def score(env: CapTurn, traj: dict) -> dict:
         rows.append({
             **{f"term/{k}": float(v) for k, v in aux["terms"].items()},
             **{k: float(aux[k]) for k in (
-                "d_theta", "thumb_gap", "index_gap", "opposition", "pinch", "paid", "bottle",
+                "d_theta", "thumb_gap", "index_gap", "opposition", "pinch", "bottle",
+                "tracked", "freewheel", "d_roll",
             )},
-            "new_grip": float(aux["new_grip"]),
         })
 
     trace = {k: np.array([r[k] for r in rows]) for k in rows[0]}
@@ -175,11 +174,13 @@ def score(env: CapTurn, traj: dict) -> dict:
         "contributions": contributions,
         "total": total,
         "per_second": total / (steps * dt),
-        "strokes": float(trace["new_grip"].sum()),
+        "roll_travel_deg": float(np.degrees(np.abs(trace["d_roll"]).sum())),
+        "strokes": float(np.degrees(np.abs(trace["d_roll"]).sum()) / 180.0),
         "net_rotation_deg": float(np.degrees(trace["d_theta"].sum())),
         "gross_rotation_deg": float(np.degrees(gross)),
-        "paid_rotation_deg": float(np.degrees(trace["paid"].sum())),
-        "paid_fraction": float(trace["paid"].sum() / gross) if gross > 0 else 0.0,
+        "tracked_rotation_deg": float(np.degrees(trace["tracked"].sum())),
+        "tracked_fraction": float(trace["tracked"].sum() / gross) if gross > 0 else 0.0,
+        "freewheel_deg": float(np.degrees(trace["freewheel"].sum())),
         "pinch_median": float(np.median(trace["pinch"])),
         "opposition_median": float(np.median(trace["opposition"])),
         "thumb_gap_mm": float(np.median(trace["thumb_gap"]) * 1000),
@@ -199,20 +200,21 @@ def report(name: str, label: str, res: dict, per_step: bool = False) -> None:
     for k, v in sorted(res["contributions"].items(), key=lambda kv: -abs(kv[1])):
         print(f"    {k:<20} {v:+12.3f} {v / res['seconds']:+12.4f}")
     print(f"    {'TOTAL':<20} {res['total']:+12.3f} {res['per_second']:+12.4f}")
-    print(f"  strokes {res['strokes']:.0f}   "
+    print(f"  roll travel {res['roll_travel_deg']:.0f} deg   "
           f"rotation net {res['net_rotation_deg']:+.1f} deg, gross {res['gross_rotation_deg']:.1f}, "
-          f"paid {res['paid_rotation_deg']:.1f} ({res['paid_fraction']*100:.1f}%)")
+          f"roll-tracked {res['tracked_rotation_deg']:.1f} ({res['tracked_fraction']*100:.1f}%), "
+          f"freewheel {res['freewheel_deg']:.1f}")
     print(f"  pinch med {res['pinch_median']:.3f}   opposition med {res['opposition_median']:+.3f}   "
           f"gaps th/ff {res['thumb_gap_mm']:.2f}/{res['index_gap_mm']:.2f} mm   "
           f"bottle on {res['bottle_steps']*100:.1f}% of steps")
     if per_step:
-        print("    t   th_mm   ff_mm     opp   pinch   dtheta_deg  paid_deg  grip  twist")
+        print("    t   th_mm   ff_mm     opp   pinch   dtheta_deg  track_deg  droll  twist")
         tr = res["trace"]
         for t in range(res["steps"]):
             print(f"  {t:3d} {tr['thumb_gap'][t]*1000:7.2f} {tr['index_gap'][t]*1000:7.2f} "
                   f"{tr['opposition'][t]:+7.3f} {tr['pinch'][t]:7.3f} "
-                  f"{np.degrees(tr['d_theta'][t]):+11.2f} {np.degrees(tr['paid'][t]):9.2f} "
-                  f"{tr['new_grip'][t]:5.0f} {tr['term/twist'][t]:+7.3f}")
+                  f"{np.degrees(tr['d_theta'][t]):+11.2f} {np.degrees(tr['tracked'][t]):9.2f} "
+                  f"{np.degrees(tr['d_roll'][t]):+6.2f} {tr['term/twist'][t]:+7.3f}")
 
 
 def main(argv: list[str] | None = None) -> None:

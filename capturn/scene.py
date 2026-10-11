@@ -36,6 +36,9 @@ IDLE_TIP_SENSORS = ("mf_tip_position", "rf_tip_position", "lf_tip_position")
 ALL_TIP_SENSORS = GAIT_TIP_SENSORS + IDLE_TIP_SENSORS
 
 CAP_JOINT = "cap_hinge"
+# M7: the forearm roll -- pronation. Declared on `rh_forearm`, the root body, so it leads both
+# qpos and ctrl; everything here resolves it by name anyway.
+ROLL_JOINT = "rh_WRJ0"
 
 # M6: the geoms a pinch must not reach. The re-fitted pregrasp opposes the two fingers at 150 deg
 # rather than 180 precisely because the far hemisphere is where the neck is, and the reward has to

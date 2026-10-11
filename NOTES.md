@@ -2327,17 +2327,63 @@ cycle that the hardware did not require. The -90 deg limit now enforces it physi
 stroke is ~90 deg of cap rotation and 4*pi needs about ten of them. Both reward devices should
 come out rather than stack on top of a geometric constraint that does the same job better.
 
+### The no-slip reward, and the inversion it produces
+
+Done, and it is the point of the milestone. `twist` was `pinch * (rotation up to the grip's
+budget)`; it is now `pinch * (rotation the forearm roll accounts for)`:
+
+    roll_drive = max(-d_roll * no_slip_ratio, 0)      # rolling negative drives the cap positive
+    tracked    = clip(d_theta, 0, roll_drive)         # the part the arm explains
+    freewheel  = max(d_theta - roll_drive, 0)         # the part it does not
+
+    twist     = pinch * tracked   / dt     w = +1.0
+    freewheel = pinch * freewheel / dt     w = -0.5
+
+Three things have to coincide to be paid: the pinch closed, the hand turning, and the cap going
+with it. `no_slip_ratio` is 1.0 rather than the measured 0.93 so a better-than-measured grip is
+never charged. `freewheel` is gated on `pinch` so a cap free-spinning after release is charged
+once, by `slip`, rather than twice -- and it exists because `slip` is blind to the M6 behaviour
+by construction: the grip there was excellent, so `(1 - pinch)` was near zero.
+
+**`stroke_budget` and the grip state machine are gone**, along with the `strokes` metric and its
+~40% undercount. The -90 deg roll limit enforces the release-and-regrip cycle geometrically, and
+a reward term stacked on top of a hardware constraint doing the same job is just another thing
+to get wrong. New metrics: `tracked_rotation`, `freewheel_rotation`, `roll_travel`.
+`tracked_rotation / cap_rotation_abs` is the headline -- the fraction of the cap's travel the
+forearm actually drove.
+
+**The scripted reference changes hands.** `squeeze_twist.roll_gait` is the M7 reference: grip,
+roll, release, roll back, ten times, no IK needed because the fingers hold a fixed pinch and the
+arm does the turning. Scored against the M1/M6 finger gait:
+
+| trajectory | return/s | twist | freewheel | roll-tracked | deg/s |
+|---|---|---|---|---|---|
+| **roll gait (pronation)** | **+0.572** | +6.65 | -0.17 | **95.7%** | 56.1 |
+| finger gait (the M1/M6 reference) | **-0.256** | +0.01 | -2.46 | 0.2% | 43.5 |
+| finger gait, no release | -0.229 | +0.01 | -2.38 | 0.2% | 41.5 |
+
+**The trajectory that was the gold standard through M6 now earns a negative return**, at a
+similar cap speed, with the same two fingers on the same pose. The only difference is what turns
+the cap. That inversion is the whole of M7 in one table, and `tests/test_reward_ranking.py` pins
+it -- plus a physics-free test that a perfect pinch spinning the cap with a motionless forearm
+is paid exactly zero and charged for all of it.
+
+### Known defects of the un-refitted pose
+
+The pronation gait brushes the bottle on 91 of 220 steps, always `rh_ffdistal` against the neck,
+during squeeze and roll. It is **not** a roll-range problem -- every static pose from -90 to 0 is
+clean at every grip -- and it does not go away with a lighter grip (66 contact steps even at
+0.40, where the pinch is already slipping). The pregrasp was fitted with the forearm welded and
+puts the pinch low enough that rolling rides the index finger onto the neck. The `bottle` term
+costs the gait only -0.01, so it is not distorting the reward yet, but the pose wants re-fitting
+before any of this is trained.
+
 Still to do, in order:
 
-1. **A no-slip term.** Nothing yet requires the *roll* to do the turning -- a policy could ignore
-   `rh_WRJ0` and finger-roll exactly as M6 did. Pay rotation to the extent the cap turns *with*
-   the hand (`d_theta_cap ~ d_roll` while gripped) and charge the mismatch. The 0.93 ratio
-   measured above is the target the term should be written against.
-2. **Remove `stroke_budget`** and the `strokes` machinery it needs -- including the metric that
-   NOTES M6 records as undercounting by ~40%, which this removes rather than fixes.
-3. **Re-fit the pregrasp** with roll free; the current pose is the M5 fit, made with the forearm
-   welded.
-4. **Re-probe buffers and parity**, then retrain three seeds. Nothing from M6 transfers.
+1. **Re-fit the pregrasp** with roll free, which should also clear the neck contact above.
+2. **Re-probe buffers and parity** -- `check_parity.py --probe` after a geometry change, which
+   M6 learned the hard way.
+3. **Retrain three seeds.** Nothing from M6 transfers: the action is 21-dim and the frame 73.
 
 ---
 

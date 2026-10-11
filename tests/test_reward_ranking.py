@@ -35,7 +35,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from scripts import score_reward  # noqa: E402
-from scripts.squeeze_twist import run  # noqa: E402
+from scripts.squeeze_twist import roll_gait, run  # noqa: E402
 
 # The gait parameters the pregrasp was re-fitted around: a light grip (0.35), two fingers, and a
 # release that really lets go. NOTES.md, M5 -- the opposed pose wants a *lighter* grip than the
@@ -64,97 +64,97 @@ def score_ctrl(env, ctrl, qpos, angle, tmp: pathlib.Path, name: str) -> dict:
 
 @pytest.fixture(scope="module")
 def reference(env, tmp_path_factory):
-    _, ctrl, res = run(release=0.008, use_wrist=False, **GAIT)
+    """M7's reference: grip, roll the forearm, release, roll back. The human motion."""
+    _, ctrl, res = roll_gait(grip=0.50, cycles=10)
     tmp = tmp_path_factory.mktemp("ranking")
-    return score_ctrl(env, ctrl, res["qpos"], res["angle"], tmp, "reference")
+    return score_ctrl(env, ctrl, res["qpos"], res["angle"], tmp, "roll_gait")
 
 
 @pytest.fixture(scope="module")
-def no_release(env, tmp_path_factory):
-    """The same gait with the release amplitude set to zero -- it grips and keeps gripping."""
-    _, ctrl, res = run(release=0.0, use_wrist=False, **GAIT)
+def finger_gait(env, tmp_path_factory):
+    """M1's gait, which turns the cap with the fingers and never rolls the forearm.
+
+    This was the reference through M6 and is now the *counter*-example: it is exactly the
+    behaviour `freewheel` exists to stop paying for.
+    """
+    _, ctrl, res = run(release=0.008, use_wrist=False, **GAIT)
     tmp = tmp_path_factory.mktemp("ranking")
-    return score_ctrl(env, ctrl, res["qpos"], res["angle"], tmp, "no_release")
+    return score_ctrl(env, ctrl, res["qpos"], res["angle"], tmp, "finger_gait")
 
 
-def test_a_single_grip_is_paid_for_one_stroke_and_no_more(env):
-    """The core of M6, with the physics taken out of it.
+def test_rotation_the_forearm_did_not_produce_pays_nothing(env):
+    """The core of M7, with the physics taken out of it.
 
-    The hand is frozen at the `pregrasp` pose -- which is a closed, opposed pinch -- and only the
-    cap's hinge angle advances. So this is the pure grind: one grip, held forever, while the cap
-    turns without limit and the fingers never release. Exactly the strategy every M5 seed found,
-    and under the old `rotate` term it was paid for every radian.
-
-    `stroke_budget` is what bounds it now. Two full turns of grinding must be paid for one
-    stroke, and the twelfth turn must be paid the same as the second: nothing.
+    The hand is frozen at the `pregrasp` pose -- a closed, opposed pinch -- the forearm roll is
+    held at zero, and only the cap's hinge advances. So the cap turns a long way under a perfect
+    grip with the arm completely still. That is the M6 policy's strategy exactly, and it is the
+    thing pronation was added to stop rewarding: `twist` must pay nothing for any of it, and
+    `freewheel` must charge for all of it.
     """
     step, _ = score_reward.make_stepper(env)
-    budget = float(env._config.reward_config.stroke_budget)
     qpos = np.asarray(env._init_q, dtype=float)
     ctrl = jp.array(env._init_ctrl)
-    d_theta = 0.02  # rad per control step, a steady 0.4 rad/s grind
+    d_theta = 0.02  # rad per control step, a steady 0.4 rad/s finger-driven spin
 
     info = {
         "cap_angle_init": jp.zeros(()),
         "last_cap_angle": jp.zeros(()),
         "last_act": jp.zeros(env.action_size),
-        "grip_held": jp.zeros((), dtype=bool),
-        "grip_angle_start": jp.zeros(()),
+        "last_roll": jp.array(qpos[env._roll_qid]),
         "ungrasped_steps": jp.zeros((), dtype=jp.int32),
     }
-    paid, pinch, twist, strokes = [], [], [], 0
-    for t in range(1, 401):  # 8 rad, a little over two full turns
+    twist, freewheel, tracked, pinch = [], [], [], []
+    for t in range(1, 201):                      # 4 rad, most of a full turn
         q = qpos.copy()
-        q[env._cap_qid] = t * d_theta
+        q[env._cap_qid] = t * d_theta            # only the cap moves; the roll stays put
         aux, info = step(jp.array(q), jp.zeros(env.mjx_model.nv), ctrl,
                          jp.zeros(env.action_size), info)
-        paid.append(float(aux["paid"]))
-        pinch.append(float(aux["pinch"]))
         twist.append(float(aux["terms"]["twist"]))
-        strokes += int(aux["new_grip"])
+        freewheel.append(float(aux["terms"]["freewheel"]))
+        tracked.append(float(aux["tracked"]))
+        pinch.append(float(aux["pinch"]))
 
-    turned = 400 * d_theta
-    assert turned > 2 * budget, "the test has to out-turn the budget for this to mean anything"
+    turned = 200 * d_theta
     assert pinch[0] > 0.3, (
-        "the pregrasp pose must be a real pinch for this to be testing the budget rather than "
-        f"the gate -- it reads {pinch[0]:.3f}"
+        "the pregrasp must be a real pinch, or this tests the grasp gate rather than no-slip -- "
+        f"it reads {pinch[0]:.3f}"
     )
-    assert strokes == 1, "one grip, never released"
-    assert sum(paid) == pytest.approx(budget, rel=0.05), (
-        f"a single grip must be paid for {budget:.3f} rad of the {turned:.2f} it turned, "
-        f"not {sum(paid):.3f}"
+    assert sum(tracked) == pytest.approx(0.0, abs=1e-9), (
+        f"the forearm never moved, so none of the {turned:.2f} rad is roll-tracked"
     )
-    # and the pay really stops rather than tapering: the last turn earns nothing at all
-    assert sum(twist[-100:]) == pytest.approx(0.0, abs=1e-9)
+    assert sum(twist) == pytest.approx(0.0, abs=1e-9), "and none of it may be paid"
+    # charged, and charged in proportion to the whole of it
+    charged = sum(freewheel) * env.dt
+    assert charged == pytest.approx(turned * pinch[0], rel=0.15), (
+        f"freewheel should charge ~pinch * {turned:.2f} rad, not {charged:.3f}"
+    )
 
 
-def test_the_reward_prefers_a_gait_to_the_same_gait_that_never_lets_go(reference, no_release):
-    """Same hand, same cycle, same rotation -- only the releases differ.
+def test_the_reward_prefers_the_forearm_to_the_fingers(reference, finger_gait):
+    """The M7 inversion, and the sharpest statement of what this milestone changed.
 
-    The no-release variant turns the cap +399 deg against the reference's +420, so under any
-    reward that pays for rotation alone the two are within 5% of each other. They are not meant
-    to be: one regrips twelve times and the other holds on. (It is not a *pure* grind -- the
-    return sweep backs the tips off incidentally, so four of its twelve cycles still register as
-    releases, which is why the separation here is 1.8x rather than the 5-20x the recorded
-    one-sided policies show. `test_a_single_grip_is_paid_for_one_stroke_and_no_more` is the clean
-    version of this.)
+    Both trajectories unscrew the cap at a similar rate -- 56 deg/s against 44 -- with the same
+    two fingers on the same pose. The only difference is *what turns it*: the reference rolls
+    the forearm and the finger gait does not. Through M6 the finger gait was the gold standard
+    and the reward was tuned to rank it first. It must now come last, and negative: it is a
+    policy turning a cap with a motion no hand makes.
     """
-    assert reference["net_rotation_deg"] > 350 and no_release["net_rotation_deg"] > 350
-    assert abs(reference["net_rotation_deg"] - no_release["net_rotation_deg"]) < 50, (
-        "the premise: these two turn the cap about equally far"
+    assert reference["tracked_fraction"] > 0.9, (
+        "the reference's rotation must be almost entirely roll-driven -- it reads "
+        f"{reference['tracked_fraction']*100:.1f}%"
     )
-    assert reference["strokes"] >= 10, "twelve scripted cycles, and the machine should see them"
-    assert no_release["strokes"] <= 6
+    assert finger_gait["tracked_fraction"] < 0.05, "the finger gait never rolls the forearm"
 
-    assert reference["paid_fraction"] > 0.9, (
-        "the reference gait must be paid for everything it turns -- `stroke_budget` is set so "
-        f"its best cycle fits, and it reads {reference['paid_fraction']*100:.1f}%"
+    assert reference["per_second"] > 0.0 > finger_gait["per_second"], (
+        f"roll {reference['per_second']:+.3f}/s must beat fingers "
+        f"{finger_gait['per_second']:+.3f}/s, and the fingers must be net-negative"
     )
-    assert no_release["paid_fraction"] < 0.6
-    assert reference["total"] > 1.5 * no_release["total"] > 0.0
+    # and the reason, not just the ordering
+    assert reference["contributions"]["twist"] > 50 * finger_gait["contributions"]["twist"]
+    assert finger_gait["contributions"]["freewheel"] < -1.0 < reference["contributions"]["freewheel"]
 
 
-def test_the_reference_gait_is_not_punished_by_any_cost_term(reference):
+def test_the_reference_gait_is_not_punished_by_any_cost_term(reference):  # noqa: D401
     """The check that caught the broad `idle_contact` at M5, kept and widened.
 
     A cost that fires on the best behaviour in the project is measuring the wrong thing. At
@@ -163,16 +163,23 @@ def test_the_reference_gait_is_not_punished_by_any_cost_term(reference):
     approach to the bottle is 3.41 mm against a 2 mm margin, so it should be exactly zero.
     """
     costs = {k: v for k, v in reference["contributions"].items() if v < 0}
-    assert reference["contributions"]["bottle"] == pytest.approx(0.0, abs=1e-9), (
-        "the reference gait never touches the bottle, so the bottle cost must be zero on it"
+    # M7: the pronation gait does brush the bottle neck -- the index fingertip rides onto it
+    # during the roll, because the pregrasp was fitted with the forearm welded and has not been
+    # re-fitted. Known, recorded in NOTES.md M7, and small: the term costs it under 0.05.
+    assert reference["contributions"]["bottle"] > -0.05, (
+        f"bottle cost on the reference: {reference['contributions']['bottle']}"
     )
     assert reference["contributions"]["idle_contact"] > -0.5, (
         f"the idle cost must not punish the reference gait: {costs.get('idle_contact')}"
     )
-    # 1e-4 rather than exactly zero: the cap angle is float32, and the gait reads -2.9e-6 of
-    # backdrive, which is rounding rather than the cap springing back.
-    assert reference["contributions"]["backdrive"] == pytest.approx(0.0, abs=1e-4), (
-        "the gait's rotation is monotonic -- it holds its angle through every release"
+    # M7: stated against `twist` rather than as an absolute epsilon. The finger gait read
+    # -2.9e-6 here, which was float32 rounding; the pronation gait loses a real but trivial
+    # 0.4 deg against 617 gained as the cap decelerates through each release, costing -0.007.
+    # What matters is that the cap is not being dragged back, so the test is a ratio.
+    assert abs(reference["contributions"]["backdrive"]) < 0.01 * reference["contributions"]["twist"], (
+        "the gait must hold its angle through each release, give or take the cap settling: "
+        f"backdrive {reference['contributions']['backdrive']:.4f} against twist "
+        f"{reference['contributions']['twist']:.2f}"
     )
     assert reference["contributions"]["twist"] > 3 * -sum(costs.values()), (
         "and the costs together must stay well under what the gait earns for gaiting"
@@ -187,23 +194,23 @@ def test_the_reference_gait_is_not_punished_by_any_cost_term(reference):
     "fix5080_ep00.npz",
 ])
 def test_recorded_policies_rank_below_the_reference_gait(env, reference, recording):
-    """Every policy M5 produced, scored against the gait none of them learned.
+    """Every policy M5 and M6 produced, scored against the gait none of them could perform.
 
-    These are the behaviours the old reward preferred: a one-sided hover, a knuckle-driven
-    grind, a flick. Each turns the cap several times further than the scripted gait and each
-    does it without a pinch, so `twist` pays almost none of it and `slip` charges for the rest.
-
-    Skipped rather than failed when the recordings are absent -- `artifacts/*.npz` is gitignored
-    and these need a GPU run to regenerate (`scripts/eval.py --save-episodes`).
+    M7 added a joint, so these recordings have 25-wide `qpos` against the model's 26 and cannot
+    be replayed at all -- they are skipped rather than silently truncated. They are kept here
+    because the comparison is still the one worth making once post-M7 episodes exist: every one
+    of them turns the cap without a forearm, which is now a negative return by construction.
     """
     path = ROOT / "artifacts" / recording
     if not path.exists():
         pytest.skip(f"{recording} not on disk; regenerate with scripts/eval.py")
+    width = np.load(path)["qpos"].shape[1]
+    if width != env.mj_model.nq:
+        pytest.skip(
+            f"{recording} has {width}-wide qpos against the model's {env.mj_model.nq}: it "
+            "predates M7's forearm roll and cannot be replayed"
+        )
 
     policy = score_reward.score(env, score_reward.load(path, env))
-    assert policy["per_second"] < reference["per_second"], (
-        f"{recording} earns {policy['per_second']:+.4f}/s against the reference gait's "
-        f"{reference['per_second']:+.4f}/s"
-    )
-    # and the reason, not just the ranking: the rotation it produces is not pinched rotation
-    assert policy["paid_fraction"] < 0.5 < reference["paid_fraction"]
+    assert policy["per_second"] < reference["per_second"]
+    assert policy["tracked_fraction"] < 0.5 < reference["tracked_fraction"]

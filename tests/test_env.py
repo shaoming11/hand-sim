@@ -191,15 +191,16 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "success",  # the 4*pi crossing -> sums to the success flag
     } <= set(state.metrics)
     assert set(scales) == {
-        "twist", "grasp", "slip", "backdrive", "bottle",
+        "twist", "grasp", "slip", "freewheel", "backdrive", "bottle",
         "idle_contact", "action_rate", "torques", "joint_vel", "success",
-    }, ("M6: `rotate` became `twist` -- rotation gated by the pinch and budgeted per grip -- "
-        "with `slip`, `backdrive` and `bottle` added. NOTES.md, M6")
+    }, ("M7: `twist` now pays only rotation the forearm roll accounts for, and `freewheel` "
+        "charges the rest -- the budget and its grip machine are gone. NOTES.md, M7")
     assert {
-        "strokes",  # -> grips taken in the episode
-        "paid_rotation",  # -> radians the budget paid for
+        "tracked_rotation",  # -> radians the forearm roll drove
+        "freewheel_rotation",  # -> radians a held pinch turned without the roll
+        "roll_travel",  # -> total forearm travel, i.e. the effective stroke count
         "slip_rotation",  # -> radians the pinch did not produce
-    } <= set(state.metrics), "M6: the three numbers that say whether a rollout is a gait"
+    } <= set(state.metrics), "M7: the four numbers that say whether the motion is human"
 
 
 def test_reset_and_step_are_jittable(env):
