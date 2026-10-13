@@ -68,6 +68,24 @@ this hand has none -- the forearm is fixed and the wrist only flexes and deviate
 specified is finger-gaited in-hand rotation, and M6 shapes the grasp, the stroke and the cadence
 of the human motion but not its actuation.
 
+**M7 adds the pronation joint** (`rh_WRJ0`, -90 to +10 deg) and paid cap rotation only to the
+extent the forearm accounted for it. **M8 corrects that overcorrection**: measured at the
+contact points, the index MCP sweeps the index pad 106.7 deg around the cap axis per radian
+against the forearm roll's 38.5, so the finger is 2.8x the lever -- and M7 was charging all of it
+at -0.5. The reward now pays rotation the **two pads carried** without slipping, `min` over the
+pair, which admits fingers, forearm or both and still refuses slip and shear. The pure-finger
+gait goes from -0.256/s under M7 to **+0.165/s**.
+
+**M8 also re-fits the pregrasp**, which was gripping the cap's bottom lip -- the index pad at
+cap-frame z = **-5.5 mm** on a cap spanning ±8 mm, and 0.63 mm off the surface, so already
+loaded with nothing left to squeeze. The fitter was constraining fingertip *sites* while the
+reward measures the nearest point of the collision *geoms*, and its settled stage froze the
+hand's mount, the one variable that decides how far it sags (settled cost 470 -> **5.69** once
+freed). Both pads now sit near the cap's mid-band with ~3 mm of clearance, pad separation 148.9
+deg against a 149 target, and the reference gait touches the bottle on **0** of 264 steps where
+it used to on 91 of 220. Parity is **0.0%**. Still nothing trained. Details in
+[`NOTES.md`](NOTES.md), M8.
+
 ## Setup (Mac, CPU)
 
 ```bash

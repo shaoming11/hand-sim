@@ -140,7 +140,7 @@
   <worldbody>
     <!-- MOUNT: pos/quat below are fitted by scripts/fit_pregrasp.py. Do not hand-edit. -->
     <body name="rh_forearm" childclass="right_hand"
-      pos="0.146557 -0.00802959 0.560228" quat="-0.0512501 0.93389 0.280681 -0.215501">
+      pos="0.157983 -0.00349073 0.554306" quat="-0.0611664 0.922645 0.312945 -0.216912">
       <inertial mass="3" pos="0 0 0.09" diaginertia="0.0138 0.0138 0.00744"/>
       <!-- M7: the only joint between the forearm and the world. The mount pos/quat above still
            fix where the arm is; this lets it roll about its own axis, and nothing else. -->

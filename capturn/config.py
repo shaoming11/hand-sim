@@ -180,14 +180,19 @@ def default_config() -> config_dict.ConfigDict:
                 # `pinch = 0.2`: below that, turning the cap is worth less than leaving it
                 # alone.
                 slip=-0.25,
-                # M7: rotation the *roll* did not produce -- a firm pinch that turns the cap by
-                # moving the fingers rather than the forearm. `slip` cannot see this: the grip
-                # is good, so `(1 - pinch)` is near zero. This is the M6 policy's whole strategy
-                # (132 finger-driven regrips an episode at 273 deg/s) and without a term for it
-                # the new joint can simply be ignored. Charged at twice `slip` because it is the
-                # specific behaviour being designed out, and gated on `pinch` so that a cap
-                # free-spinning after release is charged once, by `slip`, not twice.
-                freewheel=-0.5,
+                # M7 as `freewheel`, redefined and renamed at M8. It charged rotation the
+                # *forearm roll* did not produce, which meant it charged the fingers for
+                # contributing -- and the fingers are the stronger lever on this hand by 2.8x
+                # (`rh_FFJ3` sweeps the index pad -106.7 deg/rad about the cap axis against the
+                # roll joint's -38.5). It now charges rotation the *pads* did not carry: the
+                # grip closed, the cap turning, and no contact surface going with it, which is
+                # the cap sliding under the fingers.
+                #
+                # `slip` cannot see this -- the grip is good, so `(1 - pinch)` is near zero.
+                # Charged at twice `slip` because it is the specific behaviour being designed
+                # out, and gated on `pinch` so that a cap free-spinning after release is charged
+                # once, by `slip`, not twice.
+                grind=-0.5,
                 # M6: losing ground, charged at the rate it happens and unclipped up to
                 # `backdrive_clip`. The old `rotate` term clipped its own downside at -0.5 while
                 # paying up to +1.0, which made a cap shaken symmetrically back and forth worth

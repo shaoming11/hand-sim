@@ -197,6 +197,32 @@ checkpoint loads and all three seeds need retraining; the pregrasp wants re-fitt
 free; buffers and parity want re-probing. And the task is easier — if hard in-hand finger
 gaiting was part of the interest, that is the part this removes. See NOTES.md, M7.
 
+**M8 revision: the fingers are not passive, and the pinch belongs on the cap.** M7 paid cap
+rotation only to the extent the *forearm roll* accounted for it, and charged the rest. That was
+an overcorrection. Measured at the contact points of the re-fitted pose, `rh_FFJ3` — the index
+MCP, the joint that straightens the finger — sweeps the index pad 106.7 deg around the cap axis
+per radian, against `rh_WRJ0`'s 38.5: the index finger is 2.8x the lever the forearm is, and M7
+charged all of it at -0.5. The reward now pays rotation the **two pads carried** without
+slipping, which is the rolling constraint applied at the contacts and admits any combination of
+fingers and forearm, while still refusing slip (a cap turning under a motionless hand) and shear
+(the two pads sweeping opposite ways). `freewheel` is renamed `grind` with its meaning.
+
+The pregrasp is also re-fitted, because it was gripping the cap's bottom lip: the index pad sat
+at cap-frame z = -5.5 mm on a cap spanning ±8 mm, 0.63 mm off the surface and so already loaded.
+Two causes, both fixed — the fitter constrained fingertip *sites* while the reward measures the
+nearest point of the collision *geoms* (on that pose the two disagreed by 5 mm), and the settled
+stage froze the hand's mount, which is the one variable that decides how far it sags. Both pads
+now sit near the cap's mid-band with ~3 mm to squeeze through, and the gait's bottle contact goes
+from 91 of 220 steps to 0 of 264.
+
+Costs, stated plainly: the reward, the pose and the mount all changed, so all three seeds need
+retraining again. And one thing M8 does *not* deliver — the open-loop reference gait still does
+not demonstrate a finger-driven stroke. It realizes 25 deg of the 42 deg of index extension asked
+of it, and 13% of its rotation happens with the forearm still, no better than the pure-pronation
+gait's 17%. A fixed envelope has to split one actuator budget between gripping and sweeping on a
+pre-set schedule; the motion needs both at once, which means closed-loop grip modulation. That is
+now a question for training rather than a question about the reward. See NOTES.md, M8.
+
 **Termination.** NaN in qpos or qvel. All gaiting fingertips more than 10 cm from the cap, or the grasp lost for `grasp_grace_steps` consecutive steps. Otherwise fixed length.
 
 **M5 revision: the gait is two-fingered.** This file specified three gaiting fingertips (thumb, index, middle) throughout. It is now the thumb and index finger only -- a lateral pinch, which is how a person unscrews a cap. The middle, ring and little fingers are costed for touching the cap (`reward_config.scales.idle_contact`) rather than merely unrewarded. The measurement that forced it: on the M1 scripted gait the middle finger is in contact on 93.8% of frames against the index's 64.6%, and the first policy trained against the opposition reward leaned on the middle finger hardest of all (71.3% of steps) while leaving the thumb pad 12.15 mm off the cap. Both are legitimate three-finger grasps and neither is the one this task is for. See NOTES.md, M5.

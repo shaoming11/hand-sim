@@ -55,7 +55,9 @@ from capturn.env import CapTurn  # noqa: E402
 # The reference gait first: every other row is judged against it. The labels say what the
 # recording *is*, because that is the thing the ranking is about -- NOTES.md, M5.
 KNOWN = (
-    ("squeeze_twist.npz", "scripted reference gait (two-finger, re-fitted pose)"),
+    ("pinch_twist.npz", "M8 reference gait: fingers and forearm turning the cap together"),
+    ("roll_gait.npz", "M7 reference gait: a fixed pinch, the forearm doing all the turning"),
+    ("squeeze_twist.npz", "M1 reference gait: two fingers, no forearm roll at all"),
     ("seed1_best_ep00.npz", "policy: best three-finger seed, opposition reshaped"),
     ("sharp_s1_ep00.npz", "policy: two-finger, sharpened idle cost"),
     ("twofinger_s2_ep00.npz", "policy: two-finger seed 2, failed the task"),
@@ -156,8 +158,10 @@ def score(env: CapTurn, traj: dict) -> dict:
             **{f"term/{k}": float(v) for k, v in aux["terms"].items()},
             **{k: float(aux[k]) for k in (
                 "d_theta", "thumb_gap", "index_gap", "opposition", "pinch", "bottle",
-                "tracked", "freewheel", "d_roll",
+                "tracked", "grind", "d_roll",
             )},
+            "thumb_sweep": float(aux["sweep"][0]),
+            "index_sweep": float(aux["sweep"][1]),
         })
 
     trace = {k: np.array([r[k] for r in rows]) for k in rows[0]}
@@ -175,12 +179,21 @@ def score(env: CapTurn, traj: dict) -> dict:
         "total": total,
         "per_second": total / (steps * dt),
         "roll_travel_deg": float(np.degrees(np.abs(trace["d_roll"]).sum())),
+        # M8: how much cap rotation each degree of forearm travel bought. The cleanest single
+        # number for "are the fingers helping?" -- two gaits with the same stroke schedule and
+        # the same roll travel differ here only by what the fingers added.
+        "rotation_per_roll": (
+            float(trace["d_theta"].sum() / np.abs(trace["d_roll"]).sum())
+            if np.abs(trace["d_roll"]).sum() > 1e-9 else float("inf")
+        ),
         "strokes": float(np.degrees(np.abs(trace["d_roll"]).sum()) / 180.0),
         "net_rotation_deg": float(np.degrees(trace["d_theta"].sum())),
         "gross_rotation_deg": float(np.degrees(gross)),
         "tracked_rotation_deg": float(np.degrees(trace["tracked"].sum())),
         "tracked_fraction": float(trace["tracked"].sum() / gross) if gross > 0 else 0.0,
-        "freewheel_deg": float(np.degrees(trace["freewheel"].sum())),
+        "grind_deg": float(np.degrees(trace["grind"].sum())),
+        "thumb_sweep_median_deg": float(np.degrees(np.median(trace["thumb_sweep"]))),
+        "index_sweep_median_deg": float(np.degrees(np.median(trace["index_sweep"]))),
         "pinch_median": float(np.median(trace["pinch"])),
         "opposition_median": float(np.median(trace["opposition"])),
         "thumb_gap_mm": float(np.median(trace["thumb_gap"]) * 1000),
@@ -202,8 +215,11 @@ def report(name: str, label: str, res: dict, per_step: bool = False) -> None:
     print(f"    {'TOTAL':<20} {res['total']:+12.3f} {res['per_second']:+12.4f}")
     print(f"  roll travel {res['roll_travel_deg']:.0f} deg   "
           f"rotation net {res['net_rotation_deg']:+.1f} deg, gross {res['gross_rotation_deg']:.1f}, "
-          f"roll-tracked {res['tracked_rotation_deg']:.1f} ({res['tracked_fraction']*100:.1f}%), "
-          f"freewheel {res['freewheel_deg']:.1f}")
+          f"pad-carried {res['tracked_rotation_deg']:.1f} ({res['tracked_fraction']*100:.1f}%), "
+          f"ground {res['grind_deg']:.1f}")
+    print(f"  pad sweep about the cap axis, median: thumb "
+          f"{res['thumb_sweep_median_deg']:+.1f} deg/s, index {res['index_sweep_median_deg']:+.1f} deg/s")
+    print(f"  cap rotation per degree of forearm travel: {res['rotation_per_roll']:.3f}")
     print(f"  pinch med {res['pinch_median']:.3f}   opposition med {res['opposition_median']:+.3f}   "
           f"gaps th/ff {res['thumb_gap_mm']:.2f}/{res['index_gap_mm']:.2f} mm   "
           f"bottle on {res['bottle_steps']*100:.1f}% of steps")

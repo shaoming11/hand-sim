@@ -82,11 +82,16 @@ def grasp_geometry(points, geom_radius, origin, mat, cap_radius: float, cap_half
     """Closest approach of a group of geoms to the cap, and the direction it approaches from.
 
     `points` is (n_geoms, samples, 3) in world coordinates, `geom_radius` is (n_geoms,).
-    Returns `(gap, unit_radial)`: the smallest surface-to-surface gap over every sample, and the
-    horizontal unit vector in the cap frame pointing from the cap axis towards that closest
-    sample. The unit vector is what makes opposition measurable -- two grips are opposed when
-    their vectors point opposite ways, which is a dot product rather than an angle, so there is
-    no wrap-around to handle.
+    Returns `(gap, unit_radial, contact, which)`: the smallest surface-to-surface gap over every
+    sample; the horizontal unit vector in the cap frame pointing from the cap axis towards that
+    closest sample; the closest sample itself, in *world* coordinates; and the row of `points` it
+    came from, i.e. which geom of the group is the near one.
+
+    The unit vector is what makes opposition measurable -- two grips are opposed when their
+    vectors point opposite ways, which is a dot product rather than an angle, so there is no
+    wrap-around to handle. M8: `contact` and `which` are what let a caller ask how fast that
+    surface is sweeping around the cap, which needs the point in the world frame and the body
+    that carries it.
     """
     local = (points - origin) @ mat                        # world -> cap frame
     gaps = surface_distance(local, cap_radius, cap_half_h) - geom_radius[:, None]
@@ -95,7 +100,46 @@ def grasp_geometry(points, geom_radius, origin, mat, cap_radius: float, cap_half
     closest = local.reshape(-1, 3)[best]
     planar = closest[:2]
     norm = (planar[0] ** 2 + planar[1] ** 2) ** 0.5
-    return flat[best], planar / (norm + 1e-9)
+    return (
+        flat[best],
+        planar / (norm + 1e-9),
+        points.reshape(-1, 3)[best],
+        best // points.shape[1],
+    )
+
+
+def triple(a, b, c):
+    """Scalar triple product `a . (b x c)`, componentwise, for (..., 3) inputs.
+
+    Written out rather than via `cross` because this module is shared between the env (jax
+    arrays, under `jit`) and the CPU scripts (numpy), and the two libraries' `cross`/`stack` do
+    not interchange.
+    """
+    return (
+        a[..., 0] * (b[..., 1] * c[..., 2] - b[..., 2] * c[..., 1])
+        + a[..., 1] * (b[..., 2] * c[..., 0] - b[..., 0] * c[..., 2])
+        + a[..., 2] * (b[..., 0] * c[..., 1] - b[..., 1] * c[..., 0])
+    )
+
+
+def axial_sweep(point, velocity, origin, axis):
+    """How fast `point` is going *around* the line `(origin, axis)`, in rad/s.
+
+    M8: this is the quantity a non-slipping grip hands to the cap. A pad in contact with the cap
+    wall and sweeping around the cap axis at omega turns the cap at omega -- that is the rolling
+    constraint, and it is radius-independent, so it holds whether the pad sits at the cap's own
+    16 mm or at the 24 mm a knuckle reaches from. Motion straight at the cap (pressing) or along
+    its axis (sliding up the wall) contributes nothing, which is correct: neither turns it.
+
+    `axis` must be a unit vector. `axis x planar` has magnitude `r` and points along the tangent,
+    so `v . (axis x planar) / r**2` is `(v . tangent) / r` with no square roots and no division
+    by a radius that could be zero at the axis itself.
+    """
+    rel = point - origin
+    along = (rel * axis).sum(-1)
+    planar = rel - along[..., None] * axis
+    r2 = (planar * planar).sum(-1)
+    return triple(velocity, axis, planar) / (r2 + 1e-12)
 
 
 def cylinder_sdf(local, radius: float, half_h: float):

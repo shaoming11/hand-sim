@@ -2463,6 +2463,258 @@ training.
 
 ---
 
+## M8 — the fingers do the work, and the pinch sits on the cap
+
+Prompted by watching `artifacts/roll_gait.mp4` and two observations about it:
+
+> the index finger is grasping on the bottom of the cap, and the index finger should be
+> straightening and not just the forearm pronation doing the work.
+
+Both were right, both were measurable, and the second one is a reward-design error that M7
+introduced deliberately.
+
+### The pinch was on the cap's bottom lip
+
+Measured on the committed M7 pose, in the cap's frame, at the closest point of each finger's
+collision geoms — which is what `pinch_quality` reads:
+
+| | thumb (`rh_thdistal`) | index (`rh_ffdistal`) |
+|---|---|---|
+| surface gap | 3.27 mm | **0.63 mm** |
+| height, cap spans ±8 mm | +2.68 mm | **−5.52 mm** |
+
+The index pad sat in the **bottom 2.5 mm** of a 16 mm cap, 0.63 mm off the surface — already
+loaded, with no room to squeeze. That is exactly what the video shows, and it explains a defect
+M7 had already recorded without connecting it to a cause: the pronation gait brushed the bottle
+on 91 of 220 steps, always `rh_ffdistal` against the neck. Rolling swings a finger that starts
+on the lip down over it and onto the neck sleeve beneath.
+
+**The fitter was measuring the wrong thing.** Its pinch terms constrained the two fingertip
+*sites* radially and axially; the reward measures the nearest point of the collision *geoms*.
+On the M7 pose the two disagree by millimetres and in opposite directions — the index tip site
+read z = −4.29 mm and gap 2.95 mm, while the geom actually touching the cap was at −5.52 mm and
+0.63 mm. So the fit looked centred and clear while the surface that matters was on the lip and
+pre-loaded. `cost()` now calls `pad_geometry()`, which walks the same `capturn.scene` helpers
+`CapTurn.pinch_state` does. The index group is narrowed to `rh_ffdistal` for the *fit* only: the
+reward still lets a lateral pinch load the side of the index, but a pose whose nearest index
+surface was the proximal phalanx would be a knuckle resting on the cap.
+
+### The fit collapsed on settling, and the mount was the reason
+
+Three further fitter changes, in the order they were forced:
+
+1. **`--from-keyframe`.** Re-deriving the mount from Menagerie throws away a sound fit. Seeding
+   from the committed pose starts at a kinematic cost of 1.5 against the Menagerie seed's 6748.
+2. **Rank candidates by *settled* cost, not kinematic cost.** The two come apart badly. The best
+   kinematic fit scored **1.45** and settled to **1015**: the hand sags onto the bottle shoulder
+   the moment gravity and contact are allowed, and the pads slide off the cap. All eight
+   candidates settled above 976.
+3. **Unfreeze the mount in the settled stage.** This is what actually fixed it. The stage used to
+   run Powell over the 20 actuator targets with the mount frozen — freezing the one variable that
+   decides how much the hand sags. With the mount free and L-BFGS-B on the settled objective, the
+   settled cost goes **470.6 → 5.69**.
+
+The pose that comes out, measured the way the reward measures it:
+
+| | thumb | index |
+|---|---|---|
+| surface gap | 2.98 mm | 3.57 mm |
+| height | −0.07 mm | −1.89 mm |
+
+Pad separation **148.9 deg** against the 149.0 target. Opposition +0.769 → **+0.861**. Settled it
+does not move: `ncon = 0`, deepest contact +0.000 mm, max`|qvel|` 0.0078 rad/s, the cap drifts
+0.004 deg. Both fingers now have ~3 mm to squeeze through, where the index had 0.63.
+
+And the defect it was fitted against is gone: the reference gait touches the bottle on **0** of
+264 steps, against 91 of 220 before.
+
+### `freewheel` was charging the fingers for working
+
+M7 paid `twist` for rotation the *forearm roll* accounted for and charged everything else at
+`freewheel = -0.5`. That is wrong as biomechanics — a person straightens the index finger and
+draws the thumb across it, and pronates as well — and wrong on this scene's numbers. Per radian
+of joint, at the contact points of the re-fitted pose, in degrees of cap azimuth:
+
+| joint | thumb pad | index pad |
+|---|---|---|
+| `rh_FFJ3` (index MCP, the straightening joint) | — | **−106.7** |
+| `rh_THJ4` (thumb, drawing across) | **+165.7** | — |
+| `rh_WRJ0` (forearm pronation) | −47.9 | −38.5 |
+| `rh_WRJ1` (wrist flexion) | +199 | −226 |
+
+The index finger is **2.8x** the lever the forearm is, and M7 charged all of it.
+
+The forearm is also not a clean stand-in for the cap's rotation, because its axis is not quite
+the cap's: one roll sweeps the thumb pad at −47.9 deg/rad and the index at −38.5. Two pads cannot
+both hold a cap turning at one rate unless they sweep at one rate, so the shortfall is slip. On
+the M7 pose that ratio was 0.46 (−41.5 against −19.1), which is where M7's measured steady-state
+cap/roll ratio of 0.65 went — slip, priced as tracked rotation.
+
+### The reward: ask the pads, not the arm
+
+`pinch_state` now also returns `sweep`, each pad's angular rate **about the cap axis**, and the
+ceiling on what `twist` pays is
+
+```
+carried = max(min(sweep), 0) * ctrl_dt * no_slip_ratio
+tracked = clip(d_theta, 0, carried)      # paid, gated on the pinch
+grind   = max(d_theta - carried, 0)      # charged, gated on the pinch
+```
+
+This is the rolling constraint applied at the contacts: a pad touching the cap wall and sweeping
+around the cap axis at ω turns the cap at ω, and that is radius-independent, so it holds whether
+the pad is at the cap's 16 mm or the 27 mm a knuckle reaches from. Motion straight at the cap
+(pressing) or along its axis (sliding up the wall) contributes nothing, correctly.
+
+**`min` is the aggregator, and it is why the term rewards coordination.** Per unit joint rate:
+
+| motion | thumb sweep | index sweep | carried |
+|---|---|---|---|
+| pronation alone | +0.83 | +0.68 | **+0.68 rad/s** |
+| index straightening alone | 0.00 | +1.88 | **0.00** |
+| thumb alone | +2.89 | 0.00 | **0.00** |
+| index straightening **+** thumb across | +2.89 | +1.88 | **+1.88 rad/s** |
+| wrist shear | +3.47 | **−3.94** | **−3.94** → nothing |
+
+The two single-finger rows are not a defect: if only one pad travels, the cap cannot turn without
+sliding against the other. The human motion is the fourth row, and it carries **2.8x** what
+pronation does. The shear row is a refusal M7's reward did not have — a large, fast motion worth
+nothing, where a sum or a mean would have paid it generously.
+
+`freewheel` was **renamed to `grind`** rather than redefined in place. Its meaning inverted, and
+NOTES.md M5 records two numbers that drifted away from what they claimed to measure while keeping
+their names.
+
+**Validated against a finite difference** of the contact-point azimuth, on five joints, agreeing
+to within 0.3% — and it works under the Warp backend, which populates `cvel` and `subtree_com`.
+The velocity is taken instantaneously from `cvel` rather than by differencing the contact point's
+position, deliberately: that point is whichever sample of whichever geom is nearest the cap, and
+its identity hops between samples and between the index finger's three segments as the hand
+moves. Differencing across such a hop reports metres per second that nothing moved at.
+
+**Tried and reverted: a trapezoid.** Integrating the sweep between this step's rate and the
+previous one is the better estimator inside the env, where `qvel` is instantaneous. It is the
+*worse* one in `scripts/score_reward.py`, which reconstructs `qvel` as a control-rate difference
+of `qpos` — so the sweep it computes is already a step average, and averaging two of those smears
+each stroke across two steps and reports slip that is an artefact of the scorer. Measured, it
+moved the reference gait's slip from 183 deg to 201, the wrong way and for the wrong reason. The
+scorer is how a reward change gets checked before a two-hour GPU run; that is worth more than
+half a step of accuracy.
+
+### The ranking, and what is honestly *not* claimed
+
+`pinch_twist` is the new reference gait: grip, then sweep the pads around the cap with the
+fingers *while* the forearm pronates, release, reset both. No IK. `sweep_offset` reads each
+actuator's direction from its own fingertip Jacobian projected onto the cap tangent — the same
+quantity the reward measures — exactly as `grip_offset` projects onto the radial direction.
+
+At a **matched grip** the finger contribution is large, and largest where pronation alone fails:
+
+| grip | `roll_gait` | `pinch_twist` |
+|---|---|---|
+| 0.40 | +108.8 | +235.1 |
+| 0.50 | +326.8 | **+606.9** |
+| 0.60 | **+927.2** | +678.3 |
+| 0.70 | +33.3 | +476.2 |
+| 0.80 | +23.7 | +445.3 |
+
+Scored by the reward (10 cycles): `pinch_twist` at 0.50/0.35 earns **+0.474/s** against
+`roll_gait` at 0.50's **+0.281/s**, and the pure-finger M1 gait — which M7 ranked last and
+**negative at −0.256/s** — is now **+0.165/s** and 80% pad-carried. Nothing that genuinely grips
+the cap and genuinely turns it is charged any more.
+
+**What is not claimed: that the combined script beats pronation when each is tuned freely.** It
+does not. `roll_gait` at grip 0.60 holds a pinch of 0.597 and earns **+1.150/s**, better than any
+`pinch_twist` setting. The reason is a limitation of the *script*, not of the reward or the hand:
+`grip_offset` and `sweep_offset` draw on the same pinch actuators, so sweeping spends grip, and
+grip is what stops the roll slipping. A policy is not under that constraint — it can grip hard
+through the stroke and ease off only to reset, which is what a hand does and what no fixed
+envelope can express. `tests/test_reward_ranking.py` therefore pins the refusals and the levers,
+which are properties of the reward, and does **not** pin an ordering the script cannot honestly
+produce.
+
+What the finger motion does buy, unambiguously, is **robustness**. Across grip 0.40–0.80
+`roll_gait` ranges +23.7 to +927.2 — a factor of 39, with two of five settings barely turning the
+cap — while `pinch_twist` stays between +235 and +678, a factor of 3. A reward whose only route
+to the cap is a narrow grip window is one a policy has to find by luck.
+
+### The script does not demonstrate a finger-driven stroke, and cannot
+
+This is the gap, stated plainly because it is the thing the milestone was asked for and the thing
+it did not deliver. Measured on the realized 12-cycle trajectories:
+
+| | `pinch_twist` | `roll_gait` |
+|---|---|---|
+| cap rotation with the forearm still (<1 deg/step) | +95.7 deg, **13%** | +190.1 deg, **17%** |
+| `rh_FFJ3` travel asked of it | 42.3 deg | 22.1 deg |
+| `rh_FFJ3` travel realized | **25.2 deg** | 16.3 deg |
+
+Two things come out of this. First, the position actuators realize about 60% of the extension
+asked of them, because the finger is loaded against the cap and `kp` is finite — over a single
+steady-state turn phase `rh_FFJ3` moves −3.7 deg against the forearm's −88.8. Second, and worse
+for the claim: the finger-driven share of the rotation in `pinch_twist` is **not** larger than in
+`roll_gait`. Both get their forearm-still rotation from the squeeze and release envelope rather
+than from a tangential finger stroke, and `roll_gait` gets more of it because it spends all of
+its pinch travel on gripping.
+
+So `pinch_twist` earns its extra rotation at matched grip through how it loads the cap during the
+squeeze, not by sweeping the pads around it the way the lever table says it could. The gait is a
+better *reference* than `roll_gait` for what the reward now permits, and it is **not** a
+demonstration of the motion the lever table describes.
+
+Why that is a script limitation rather than a finding about the hand: a fixed envelope has one
+actuator budget and has to split it between gripping and sweeping, and it has to do so on a
+schedule fixed before the rollout starts. The motion the lever table describes needs grip *and*
+sweep at full value simultaneously, which means modulating grip force against measured contact
+— closed loop. That is what the policy can do and the script cannot, and it is now the thing
+training has to show. The reward no longer stands in its way, which is what M8 actually changed.
+
+### Tests
+
+`tests/test_reward_ranking.py` is rewritten around what can be stated without a trajectory:
+
+* `test_rotation_the_pads_did_not_carry_pays_nothing` — frozen hand, cap advancing: pure slip,
+  `twist` pays 0, `grind` charges all of it. M7's test, now proving the stronger thing: M7 asked
+  only that the forearm be still, which a hand turning the cap with its fingers also satisfies.
+* `test_shearing_the_pinch_carries_nothing_however_fast` — new.
+* `test_the_fingers_carry_more_than_the_forearm_can` — the 2.8x lever, physics-free.
+* `test_every_gait_that_really_grips_is_paid` — all three gaits net-positive.
+* `test_the_finger_motion_makes_the_gait_robust_to_grip` — slow, ten rollouts.
+
+### Buffers and parity, re-probed on the new pose
+
+| | `pinch_twist` | configured |
+|---|---|---|
+| `ncollision` max | 14 | -- |
+| `nefc` max | 46 | -- |
+| `naconmax` / world at 2x | 28 | 48 |
+| `njmax` / world at 2x | 92 | 150 |
+
+Both inside, with more headroom than M7 had (which needed 36 and 98). Parity is the best in the
+project: **0.0%**, CPU +742.41 deg against warp +742.53, worst gap along the trajectory 0.5%, no
+overflow flags. The `sim_dt` halving check is 0.3%. M2 criteria all PASS.
+
+The `cvel` dependency is worth noting because it is new: the reward now reads `data.cvel` and
+`data.subtree_com`, and the Warp backend does populate both — checked, not assumed, and the
+parity run above exercises it.
+
+### Still to do
+
+1. **Retrain three seeds.** Nothing from M6 or M7 transfers: the reward, the pose and the mount
+   all changed.
+2. Watch `eval/episode_tracked_rotation / eval/episode_cap_rotation_abs` (the carried fraction)
+   and the two `sweep_per_step` metrics from the first eval. The sweeps are where "the index
+   finger straightens" shows up and nowhere else; `train.py` prints both. Note that its progress
+   line had been asking for `episode_paid_rotation` and `episode_strokes` — M6 metric names that
+   M7 deleted — and printing nothing, silently, via `.get`.
+3. The specific thing to look for: does a policy beat the script's 13% forearm-still rotation?
+   That is the number that says whether the fingers are driving the cap or just holding it, and
+   the script cannot raise it. If a trained policy also sits near 13%, the reward permits the
+   motion but something else prevents it — actuator authority at the index MCP is the first
+   place to look, since the script only realizes 60% of the extension it asks for.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is

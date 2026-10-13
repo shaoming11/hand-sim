@@ -191,16 +191,19 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "success",  # the 4*pi crossing -> sums to the success flag
     } <= set(state.metrics)
     assert set(scales) == {
-        "twist", "grasp", "slip", "freewheel", "backdrive", "bottle",
+        "twist", "grasp", "slip", "grind", "backdrive", "bottle",
         "idle_contact", "action_rate", "torques", "joint_vel", "success",
-    }, ("M7: `twist` now pays only rotation the forearm roll accounts for, and `freewheel` "
-        "charges the rest -- the budget and its grip machine are gone. NOTES.md, M7")
+    }, ("M8: `twist` pays rotation the two pads carried without slipping and `grind` charges the "
+        "rest. It was `freewheel` through M7, which charged everything the *forearm* did not "
+        "produce and so charged the fingers for working. NOTES.md, M8")
     assert {
-        "tracked_rotation",  # -> radians the forearm roll drove
-        "freewheel_rotation",  # -> radians a held pinch turned without the roll
+        "tracked_rotation",  # -> radians the two pads carried
+        "grind_rotation",  # -> radians the cap slid under a closed grip
         "roll_travel",  # -> total forearm travel, i.e. the effective stroke count
         "slip_rotation",  # -> radians the pinch did not produce
-    } <= set(state.metrics), "M7: the four numbers that say whether the motion is human"
+        "thumb_sweep_per_step",  # -> how fast each pad went round the cap axis ...
+        "index_sweep_per_step",  # ... which is where "the index finger straightens" shows up
+    } <= set(state.metrics), "M8: the numbers that say whether the motion is human"
 
 
 def test_reset_and_step_are_jittable(env):

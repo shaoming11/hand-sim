@@ -489,16 +489,24 @@ def main(argv: list[str] | None = None) -> None:
             # Near 1 is a gait; near 0 is the cap being shaken back and forth.
             line.append(f"net/gross {float(net) / float(gross):+.2f}")
 
-        # M6: the four numbers that say whether a rising reward is a gait or a grind, because
+        # M6: the numbers that say whether a rising reward is a gait or a grind, because
         # `reward` and `success` cannot tell them apart -- every M5 seed scored 100% success
-        # with a one-sided push. `paid` is the fraction of the cap's gross rotation that the
-        # pinch produced and the stroke budget paid for: 100% on the scripted reference gait,
-        # 7-11% on every policy M5 produced. NOTES.md, M6.
-        paid = metrics.get("eval/episode_paid_rotation")
-        if paid is not None and gross is not None and float(gross) > 1e-9:
-            line.append(f"paid {float(paid) / float(gross) * 100:5.1f}%")
+        # with a one-sided push.
+        #
+        # M8: `carried` is the fraction of the cap's gross rotation that the two pads actually
+        # carried, i.e. turned without slipping under them. It was `paid` against the stroke
+        # budget at M6 and `tracked` against the forearm roll at M7; both of those metric names
+        # are gone from the env, and this line was still asking for them -- silently, via
+        # `.get`, printing nothing. The two `sweep` figures say *how* the rotation was produced:
+        # a policy that only pronates shows a small index sweep, and one that straightens the
+        # index as a person does shows a large one.
+        carried = metrics.get("eval/episode_tracked_rotation")
+        if carried is not None and gross is not None and float(gross) > 1e-9:
+            line.append(f"carried {float(carried) / float(gross) * 100:5.1f}%")
         for key, label, fmt in (
-            ("eval/episode_strokes", "strokes", "{:5.1f}"),
+            ("eval/episode_roll_travel", "roll", "{:5.1f}"),
+            ("eval/episode_thumb_sweep_per_step", "th/s", "{:+6.2f}"),
+            ("eval/episode_index_sweep_per_step", "ff/s", "{:+6.2f}"),
             ("eval/episode_pinch_per_step", "pinch", "{:+.3f}"),
             ("eval/episode_opposition_per_step", "opp", "{:+.3f}"),
         ):

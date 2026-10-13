@@ -50,7 +50,25 @@ MENAGERIE_KEYFRAMES = ROOT / "assets" / "shadow_hand" / "keyframes.xml"
 # M5: imported rather than redeclared, so the fitter and the env cannot drift apart. They had:
 # this file still fitted a three-finger tripod after `capturn.scene` moved to a two-finger
 # pinch, and the pose it produces is what decides whether the pinch is physically available.
-from capturn.scene import GAIT_TIPS, IDLE_TIPS  # noqa: E402
+from capturn.scene import (  # noqa: E402
+    GAIT_TIPS,
+    IDLE_TIPS,
+    THUMB_BODIES,
+    grasp_geometry,
+    segment_points,
+)
+
+# M8: the surfaces the *reward* measures the pinch on. `pinch_quality` reads the closest point
+# on a finger's collision geoms, not its fingertip site, and in the M7 pose the two disagreed by
+# 5 mm: the index tip site read z = -4.3 mm on the cap while the geom actually touching it sat at
+# -5.8 mm, in the bottom 2 mm of a cap that spans -8 to +8. The fit therefore looked centred and
+# was gripping the lip. Fitting the same quantity the reward reads removes that gap.
+#
+# The thumb group is the reward's own; the index is narrowed to the distal pad on purpose. The
+# reward lets a lateral pinch load the *side* of the index (`INDEX_BODIES` is all three segments)
+# and that freedom is kept -- but a pose whose nearest index surface was the proximal phalanx
+# would be a knuckle resting on the cap, not a pinch to open from.
+PAD_BODIES = {"thumb": THUMB_BODIES, "index": ("rh_ffdistal",)}
 
 # Seeding needs three non-collinear tips to define the hand's plane, which is a question about
 # the hand's orientation and not about which fingers pinch. It stays a tripod even though the
@@ -160,10 +178,11 @@ def actuator_to_qpos_map(model: mujoco.MjModel) -> list[list[tuple[int, float]]]
 # the fit
 # --------------------------------------------------------------------------------------
 class PregraspFitter:
-    def __init__(self) -> None:
+    def __init__(self, from_keyframe: bool = False) -> None:
         self.model = mujoco.MjModel.from_xml_path(SCENE.as_posix())
         self.data = mujoco.MjData(self.model)
         m = self.model
+        self.from_keyframe = from_keyframe
 
         self.forearm = m.body("rh_forearm").id
         self.cap_geom = m.geom("cap").id
@@ -195,7 +214,40 @@ class PregraspFitter:
         self._true_margin = m.geom_margin.copy()
         m.geom_margin[:] = IK_MARGIN
 
-        self.seed_pos, self.seed_mat = self._seed()
+        # M8: the pinch surfaces, resolved the way the env resolves them.
+        capsule = mujoco.mjtGeom.mjGEOM_CAPSULE
+        self.pad_groups = {}
+        for name, bodies in PAD_BODIES.items():
+            ids = [
+                g for g in range(m.ngeom)
+                if m.body(m.geom_bodyid[g]).name in bodies
+                and (m.geom_contype[g] or m.geom_conaffinity[g])
+            ]
+            if not ids:
+                raise ValueError(f"no collision geoms on {bodies}")
+            self.pad_groups[name] = (
+                np.array(ids),
+                np.array([m.geom_size[g, 0] for g in ids], dtype=float),
+                np.array([m.geom_size[g, 1] if m.geom_type[g] == capsule else 0.0 for g in ids],
+                         dtype=float),
+            )
+
+        # M8: the mount and targets the scene already carries. Captured before `_seed()`, which
+        # mutates both to build the Menagerie seed. Starting here is what `--from-keyframe` does:
+        # the committed pose is a sound fit in every respect but the one being corrected -- the
+        # pinch height -- so re-deriving the mount from Menagerie throws away work and lands the
+        # optimiser somewhere else entirely. Measured: the Menagerie seed re-fits to a settled
+        # cost of 320 with the tips 14-17 mm out of the axial band; this one starts at 41.
+        self.keyframe_mount = (
+            np.array(m.body_pos[self.forearm], dtype=float).copy(),
+            quat2mat(np.array(m.body_quat[self.forearm], dtype=float).copy()),
+        )
+        self.keyframe_ctrl = np.array(m.keyframe("pregrasp").ctrl, dtype=float).copy()
+
+        if from_keyframe:
+            self.seed_pos, self.seed_mat = self.keyframe_mount
+        else:
+            self.seed_pos, self.seed_mat = self._seed()
 
     # -- seeding -----------------------------------------------------------------------
     def _seed(self) -> tuple[np.ndarray, np.ndarray]:
@@ -231,6 +283,10 @@ class PregraspFitter:
         return pos, mat
 
     def seed_params(self) -> np.ndarray:
+        if self.from_keyframe:
+            u = self.keyframe_ctrl.copy()
+            u[self.roll_act] = ROLL_NEUTRAL
+            return np.concatenate([self.seed_pos, np.zeros(3), np.clip(u, self.lo, self.hi)])
         text = MENAGERIE_KEYFRAMES.read_text()
         seed = np.array(
             [float(x) for x in re.search(r'name="grasp sphere" qpos="([^"]+)"', text).group(1).split()]
@@ -288,35 +344,61 @@ class PregraspFitter:
             m.geom_margin[:] = margin
         mujoco.mj_forward(m, d)
 
+    # -- the pinch, as the reward sees it ----------------------------------------------
+    def pad_geometry(self) -> dict[str, tuple[float, float, float]]:
+        """`{pad: (surface gap, height above the cap mid-plane, azimuth)}` at the placed pose.
+
+        The same walk `CapTurn.pinch_state` does, through the same `capturn.scene` helpers, so a
+        pose that scores well here scores well under the reward. Call `place()` first.
+        """
+        d = self.data
+        origin = np.array(d.site("cap_site").xpos)
+        mat = np.array(d.site("cap_site").xmat).reshape(3, 3)
+        out = {}
+        for name, (ids, radius, half_length) in self.pad_groups.items():
+            points = segment_points(
+                d.geom_xpos[ids], d.geom_xmat[ids].reshape(-1, 3, 3), half_length
+            )
+            gap, direction, contact, _ = grasp_geometry(
+                points, radius, origin, mat, self.cap_radius, self.cap_half_h
+            )
+            local = (contact - origin) @ mat
+            out[name] = (float(gap), float(local[2]), float(np.arctan2(direction[1], direction[0])))
+        return out
+
     # -- objective ---------------------------------------------------------------------
     def cost(self, x: np.ndarray, settle_steps: int = 0) -> float:
         self.place(x, settle_steps)
         d = self.data
-        c, R = self.cap_centre, self.cap_radius
+        c = self.cap_centre
         total = 0.0
 
-        tips = np.array([d.site(t).xpos for t in GAIT_TIPS]) - c
-        radial = np.linalg.norm(tips[:, :2], axis=1)
-        total += 1e6 * np.sum((radial - (R + STANDOFF)) ** 2)
-        # Asymmetric floor on top of the symmetric target. A tip that starts already loaded
+        # M8: measured on the collision geoms, which is where the reward measures it. Was the
+        # two fingertip *sites*, radially against `R + STANDOFF`; the gap below is already
+        # surface-to-surface, so the cap radius no longer enters.
+        pads = self.pad_geometry()
+        gaps = np.array([pads[n][0] for n in PAD_BODIES])
+        heights = np.array([pads[n][1] for n in PAD_BODIES])
+        total += 1e6 * np.sum((gaps - STANDOFF) ** 2)
+        # Asymmetric floor on top of the symmetric target. A pad that starts already loaded
         # against the cap cannot squeeze -- a fit that left the thumb 0.7 mm off the wall scored
         # well on every other term and then gaited at 5 deg where a clean pose gets 88.
         # M5: 5e6 -> 5e8. With only two gaiting tips the optimiser has far fewer competing
         # radial terms and happily traded the floor away for opposition, landing the index
         # 0.18 mm off the cap -- pre-loaded, unable to squeeze, and failing
         # `test_pregrasp_leaves_room_to_squeeze`. The floor has to outrank the opposition term.
-        total += 5e8 * np.sum(np.maximum(0.0, (R + MIN_STANDOFF) - radial) ** 2)
+        total += 5e8 * np.sum(np.maximum(0.0, MIN_STANDOFF - gaps) ** 2)
         total += 1e6 * np.sum(
-            np.maximum(0.0, np.abs(tips[:, 2] - AXIAL_TARGET) - AXIAL_BAND) ** 2
+            np.maximum(0.0, np.abs(heights - AXIAL_TARGET) - AXIAL_BAND) ** 2
         )
 
-        az = np.arctan2(tips[:, 1], tips[:, 0])
+        az = np.array([pads[n][2] for n in PAD_BODIES])
         sep = abs(np.arctan2(np.sin(az[0] - az[1]), np.cos(az[0] - az[1])))
         # Two-sided, unlike the old floor: a pinch is worse when the tips crowd one side *and*
         # when they splay past each other, and only 180 deg lets the squeeze become pure torque.
         total += 2e4 * (TIP_OPPOSITION - sep) ** 2
 
-        idle = np.array([d.site(t).xpos for t in IDLE_TIPS]) - c
+        idle = np.array([d.site(t).xpos for t in IDLE_TIPS]) - c  # tip sites: what `idle_contact` reads
         idle_r = np.linalg.norm(idle[:, :2], axis=1)
         total += 5e4 * np.sum(np.maximum(0.0, IDLE_RADIUS - idle_r) ** 2)
 
@@ -351,7 +433,14 @@ class PregraspFitter:
             float(abs(np.arctan2(np.sin(az[a] - az[b]), np.cos(az[a] - az[b]))))
             for i, a in enumerate(GAIT_TIPS) for b in GAIT_TIPS[i + 1:]
         ]
+        pads = self.pad_geometry()
+        pad_sep = abs(np.arctan2(
+            np.sin(pads["thumb"][2] - pads["index"][2]),
+            np.cos(pads["thumb"][2] - pads["index"][2]),
+        ))
         return {
+            "pads": pads,
+            "pad_separation_deg": float(np.degrees(pad_sep)),
             "separations_deg": sorted(np.degrees(seps).round(1).tolist()),
             "radial": {k: float(np.linalg.norm(v[:2])) for k, v in rel.items()},
             "axial": {k: float(v[2]) for k, v in rel.items()},
@@ -410,16 +499,22 @@ def main() -> None:
     ap.add_argument("--write", action="store_true", help="patch the XML files in place")
     ap.add_argument("--restarts", type=int, default=12)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--from-keyframe", action="store_true",
+                    help="seed from the committed pregrasp rather than from Menagerie")
+    ap.add_argument("--settled-iters", type=int, default=120,
+                    help="L-BFGS-B iterations on the settled objective")
+    ap.add_argument("--settled-candidates", type=int, default=5,
+                    help="how many of the best kinematic fits to re-rank by settled cost")
     ap.add_argument("--settle-polish", type=float, default=0.6,
                     help="seconds of simulation inside the final objective (0 disables)")
     args = ap.parse_args()
 
-    fit = PregraspFitter()
+    fit = PregraspFitter(from_keyframe=args.from_keyframe)
     bounds = fit.bounds()
     x0 = fit.seed_params()
     rng = np.random.default_rng(args.seed)
 
-    best, best_cost = None, np.inf
+    candidates = []
     for k in range(args.restarts):
         start = x0.copy()
         if k:  # jitter the actuator targets only; the seeded mount pose is already sound
@@ -432,37 +527,79 @@ def main() -> None:
         )
         tag = "seed" if k == 0 else f"restart {k}"
         print(f"  {tag:10s} cost {res.fun:12.4f}")
-        if res.fun < best_cost:
-            best, best_cost = res.x, res.fun
+        candidates.append((float(res.fun), res.x))
 
+    candidates.sort(key=lambda c: c[0])
+    best, best_cost = candidates[0][1], candidates[0][0]
     res = optimize.minimize(
         fit.cost, best, method="L-BFGS-B", bounds=bounds,
         options={"maxiter": 5000, "maxfun": 500000, "eps": 3e-6, "ftol": 1e-14, "gtol": 1e-12},
     )
     if res.fun < best_cost:
-        best, best_cost = res.x, res.fun
+        candidates.insert(0, (float(res.fun), res.x))
+        best, best_cost = res.x, float(res.fun)
     print(f"  {'polish':10s} cost {res.fun:12.4f}   (kinematic)")
 
     # The keyframe is the settled pose, so finish by optimising the settled pose itself. The mount
     # is frozen here: only the 20 actuator targets move, which keeps this stage cheap.
     steps = int(round(args.settle_polish / fit.model.opt.timestep))
+
+    # M8: choose which candidate to polish by how it *settles*, not by how it scores
+    # kinematically. The two come apart badly. The fit that prompted this scored 1.45 kinematic
+    # -- all but perfect -- and 1015 settled: the hand sags onto the bottle shoulder the moment
+    # gravity and contact are allowed, putting the index pad 20 mm below the cap. A candidate
+    # scoring 4.3 kinematically settled an order of magnitude better. Kinematic cost is a cheap
+    # proxy that the optimiser is free to overfit, and the keyframe is the settled pose, so rank
+    # by the thing that is actually being chosen.
+    if steps and len(candidates) > 1:
+        print(f"  ranking the best {min(args.settled_candidates, len(candidates))} candidates by "
+              "settled cost ...")
+        ranked = []
+        for kinematic, x in candidates[:args.settled_candidates]:
+            settled = fit.cost(x, settle_steps=steps)
+            print(f"    kinematic {kinematic:12.4f}  ->  settled {settled:12.4f}")
+            ranked.append((settled, x))
+        ranked.sort(key=lambda c: c[0])
+        best = ranked[0][1]
+
     if steps:
         print(f"  settling {args.settle_polish:.2f} s inside the objective "
               f"({steps} steps/evaluation) ...")
-        mount = best[:6].copy()
-        res = optimize.minimize(
-            lambda u: fit.cost(np.concatenate([mount, u]), settle_steps=steps),
-            best[6:], method="Powell", bounds=bounds[6:],
-            options={"maxiter": 40, "maxfev": 24000, "xtol": 1e-4, "ftol": 1e-6},
-        )
-        settled_cost = res.fun
         before = fit.cost(best, settle_steps=steps)
-        if settled_cost < before:
-            best = np.concatenate([mount, res.x])
-        print(f"  {'settled':10s} cost {min(settled_cost, before):12.4f}   "
+        # M8: optimise the *mount* here too, and with a gradient method.
+        #
+        # This stage used to run Powell over the 20 actuator targets with the mount frozen, and
+        # that is the wrong thing to freeze. What goes wrong when the fitted pose is simulated is
+        # sag: the hand settles onto the bottle shoulder and the pads slide off the cap. Where
+        # the hand hangs is exactly what decides how much it sags, so holding it fixed left the
+        # one stage that can see the problem unable to fix it -- measured, every one of eight
+        # kinematic candidates settled to a cost above 976 while scoring 1.5 to 53 kinematically,
+        # and the frozen-mount polish could only reach 470.
+        res = optimize.minimize(
+            lambda x: fit.cost(x, settle_steps=steps), best,
+            method="L-BFGS-B", bounds=bounds,
+            options={"maxiter": args.settled_iters, "maxfun": 200000, "eps": 1e-4,
+                     "ftol": 1e-10, "gtol": 1e-8},
+        )
+        if res.fun < before:
+            best = res.x
+        print(f"  {'settled':10s} cost {min(float(res.fun), before):12.4f}   "
               f"(was {before:.4f} before this stage)")
 
     rep = fit.report(best, settle_steps=steps)
+    # M8 first: this is what the *reward* measures, and what the objective now fits. The tip-site
+    # table below it is the legacy view and the two genuinely disagree -- a pose can have its
+    # fingertip sites several millimetres from the cap while the geom actually touching it is
+    # where it should be, which is how the M7 pose came to be gripping the cap's bottom lip while
+    # its tip-site numbers looked centred.
+    print("\nthe pinch at the SETTLED pose, measured on the collision geoms as the reward does "
+          f"(cap radius {fit.cap_radius*1e3:.0f} mm, half-height {fit.cap_half_h*1e3:.0f} mm):")
+    for name, (gap, height, az) in rep["pads"].items():
+        print(f"  {name:6s} surface gap {gap*1e3:6.2f} mm   height {height*1e3:+6.2f} mm "
+              f"(cap spans {-fit.cap_half_h*1e3:+.0f} to {fit.cap_half_h*1e3:+.0f})   "
+              f"azimuth {np.degrees(az):+7.1f} deg")
+    print(f"  pad separation {rep['pad_separation_deg']:.1f} deg "
+          f"(target {np.degrees(TIP_OPPOSITION):.1f})")
     print("\nfingertip geometry at the SETTLED pose, relative to the cap (radius "
           f"{fit.cap_radius*1e3:.0f} mm, half-height {fit.cap_half_h*1e3:.0f} mm):")
     print(f"  azimuthal separations: {rep['separations_deg']} deg")

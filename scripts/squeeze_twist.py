@@ -221,6 +221,50 @@ class OpenLoopGait:
                 offset[a] = grip * (bound - self.u0[a])
         return offset
 
+    def sweep_offset(self, amount: float) -> np.ndarray:
+        """Target change that sweeps each pinch pad *around* the cap axis, not into it.
+
+        M8. The direction is read off each actuator's own fingertip Jacobian, projected onto the
+        cap's tangential direction -- deliberately the same quantity `CapTurn.pinch_state`
+        reports as `sweep`, because that is what a non-slipping contact hands to the cap. Built
+        the same way as `grip_offset`, which projects onto the *radial* direction instead: grip
+        presses, sweep turns.
+
+        On the fitted pose this picks out index extension and thumb adduction, and they come out
+        opposed in joint space but agreed in cap space -- the index straightens while the thumb
+        draws across it, and both pads travel the same way round the cap. That is what a person
+        does to a bottle cap, and the measured levers say why it is worth doing: per radian,
+        `rh_FFJ3` sweeps the index pad 106.7 deg around the cap against the forearm roll's 38.5.
+        Driven together at one joint rate, the fingers carry the cap at 1.88 rad/s where
+        pronation carries it at 0.68.
+
+        `amount` is the fraction of each actuator's remaining travel in that direction.
+        """
+        m, d = self.model, self.data
+        d.qpos[:] = self.qpos_of(self.u0)
+        d.qvel[:] = 0.0
+        mujoco.mj_forward(m, d)
+        origin, mat = self._cap_frame()
+        jac = np.zeros((3, m.nv))
+        offset = np.zeros(m.nu)
+        for finger, sid in zip(self.fingers, self.tip_ids):
+            mujoco.mj_jacSite(m, d, jac, None, sid)
+            columns = jac @ self.A
+            p = mat.T @ (d.site(sid).xpos - origin)
+            # +azimuth about the cap axis, in world coordinates: the cap's own turning direction
+            tangential = mat @ np.array([-p[1], p[0], 0.0]) / np.linalg.norm(p[:2])
+            for a in range(m.nu):
+                if not self.grip_mask[a] or not m.actuator(a).name.startswith(
+                    FINGER_ACTUATORS[finger]
+                ):
+                    continue
+                toward = tangential @ columns[:, a]
+                if abs(toward) < 1e-4:
+                    continue
+                bound = self.hi[a] if toward > 0 else self.lo[a]
+                offset[a] = amount * (bound - self.u0[a])
+        return offset
+
     # -- offline IK --------------------------------------------------------------------
     def solve(self, path: np.ndarray, iters: int = 30, damping: float = 0.05) -> np.ndarray:
         """Damped-least-squares IK in actuator space, run without contact."""
@@ -328,6 +372,67 @@ def roll_gait(grip: float = 0.5, cycles: int = 10, roll_to: float = -1.5708,
     return gait, ctrl, gait.rollout(ctrl)
 
 
+def pinch_twist(grip: float = 0.5, sweep: float = 0.35, cycles: int = 10,
+                roll_to: float = -1.5708, steps: tuple[int, int, int, int] = (4, 10, 2, 6)):
+    """M8: the human motion -- grip, then turn the cap with the *fingers and* the forearm.
+
+    `roll_gait` (M7) holds a fixed pinch and lets `rh_WRJ0` do all the work. That is not how a
+    person unscrews a bottle cap, and on this hand it is not the strong way to do it either: the
+    forearm roll sweeps the index pad 38.5 deg of cap azimuth per radian where `rh_FFJ3` sweeps
+    it 106.7.
+
+    So this gait adds the fingers to the stroke: while the pinch is closed, `sweep_offset` draws
+    both pads around the cap (the index straightening, the thumb coming across) at the same time
+    as the forearm pronates. Release, reset both, repeat. Needs no IK, like `roll_gait`.
+
+    At a matched grip that is worth a great deal -- at grip 0.50, +606.9 deg over ten cycles
+    against `roll_gait`'s +326.8, and at 0.70 and 0.80, where pronation alone barely turns the
+    cap at all (+33 and +24), it still manages +476 and +445.
+
+    `sweep` is the fraction of the pinch actuators' remaining travel spent turning rather than
+    gripping, and that is this gait's one real limitation: the two draw on the same actuators,
+    so sweeping spends grip, and grip is what stops the roll slipping. Tuned independently,
+    `roll_gait` at grip 0.60 beats every setting of this one.
+
+    Do not oversell what this demonstrates. Measured on the realized trajectory, 13% of the cap's
+    rotation happens with the forearm still -- *less* than `roll_gait`'s 17% -- and `rh_FFJ3`
+    realizes 25 deg of the 42 asked of it, because a loaded finger does not extend far against a
+    finite `kp`. The extra rotation at matched grip is real but comes from how the squeeze loads
+    the cap, not from sweeping the pads around it. A fixed envelope cannot do better: the motion
+    the lever table describes needs grip and sweep at full value at the same time, which means
+    modulating grip against measured contact. That is a policy's job, and the reward no longer
+    stands in its way. NOTES.md, M8.
+
+    Returns `(gait, ctrl, result)` like `run`, so the three are interchangeable to a caller.
+    """
+    gait = OpenLoopGait(["th", "ff"], use_wrist=False)
+    m = gait.model
+    roll_a = m.actuator("rh_A_WRJ0").id
+    squeeze, turn_n, release, back = steps
+    per = squeeze + turn_n + release + back
+
+    hold_offset = gait.grip_offset(grip)
+    turn_offset = gait.sweep_offset(sweep)
+    ctrl = np.tile(gait.u0, (cycles * per, 1))
+    for c in range(cycles):
+        base = c * per
+        for i in range(per):
+            t = base + i
+            if i < squeeze:                                   # close the pinch, hand at 0
+                hold, turn = ease((i + 1) / squeeze), 0.0
+            elif i < squeeze + turn_n:                        # gripped: fingers AND forearm turn
+                hold, turn = 1.0, ease((i - squeeze + 1) / turn_n)
+            elif i < squeeze + turn_n + release:              # let go, everything still turned
+                hold, turn = 1.0 - ease((i - squeeze - turn_n + 1) / release), 1.0
+            else:                                             # open hand resets for another
+                hold = 0.0
+                turn = 1.0 - ease((i - squeeze - turn_n - release + 1) / back)
+            ctrl[t] = gait.u0 + hold * hold_offset + turn * turn_offset
+            ctrl[t, roll_a] = roll_to * turn
+    ctrl = np.clip(ctrl, gait.lo, gait.hi)
+    return gait, ctrl, gait.rollout(ctrl)
+
+
 def run(fingers, grip, twist, release, cycles, use_wrist, grip_z=0.0, steps=(4, 6, 2, 4)):
     gait = OpenLoopGait(fingers, use_wrist=use_wrist)
     path, envelope = gait.plan(twist, release, cycles, grip_z, steps)
@@ -360,6 +465,17 @@ def main() -> None:
     ap.add_argument("--use-wrist", action="store_true", help="let the IK move the wrist too")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--sweep", action="store_true")
+    # M8: the three reference gaits, reachable from the command line. `pinch` is the current
+    # reference -- fingers and forearm together -- `roll` is M7's forearm-only stroke and
+    # `finger` is M1's, which uses no forearm at all. They are the rows `score_reward.py` and
+    # `tests/test_reward_ranking.py` compare, so being able to render any of them matters.
+    ap.add_argument("--gait", default="pinch", choices=("pinch", "roll", "finger"))
+    ap.add_argument("--pinch-sweep", type=float, default=0.35,
+                    help="--gait pinch: fraction of pinch travel spent turning rather than gripping")
+    ap.add_argument("--roll-to", type=float, default=-1.5708,
+                    help="--gait pinch/roll: forearm roll at the end of a stroke [rad]")
+    ap.add_argument("--grid", action="store_true",
+                    help="--gait pinch: print the grip x sweep grid instead of a rollout")
     args = ap.parse_args()
 
     fingers = [f.strip() for f in args.fingers.split(",") if f.strip()]
@@ -383,14 +499,46 @@ def main() -> None:
             print()
         return
 
-    gait, ctrl, res = run(fingers, args.grip, args.twist, args.release, args.cycles,
-                          args.use_wrist, args.grip_z, phase_steps)
+    if args.grid:
+        sweeps = (0.20, 0.30, 0.35, 0.40, 0.45, 0.55)
+        print(f"--gait pinch: cap rotation [deg] after {args.cycles} cycles "
+              "(deepest penetration in brackets)\n")
+        print("  grip \\ sweep " + "".join(f"{x:>18.2f}" for x in sweeps))
+        for grip in (0.40, 0.50, 0.60, 0.70, 0.80):
+            row = []
+            for sweep in sweeps:
+                _, _, r = pinch_twist(grip=grip, sweep=sweep, cycles=args.cycles,
+                                      roll_to=args.roll_to, steps=phase_steps)
+                row.append(f"{r['total_deg']:10.1f} [{r['worst_penetration_mm']:5.2f}]")
+            print(f"  {grip:8.2f}    " + "".join(row))
+        print("\n  --gait roll, the same grips, for comparison")
+        for grip in (0.40, 0.50, 0.60, 0.70, 0.80):
+            _, _, r = roll_gait(grip=grip, cycles=args.cycles, roll_to=args.roll_to,
+                                steps=phase_steps)
+            print(f"    grip {grip:4.2f}  {r['total_deg']:+9.1f} deg  "
+                  f"[{r['worst_penetration_mm']:5.2f} mm]")
+        return
+
+    if args.gait == "pinch":
+        gait, ctrl, res = pinch_twist(grip=args.grip, sweep=args.pinch_sweep,
+                                      cycles=args.cycles, roll_to=args.roll_to,
+                                      steps=phase_steps)
+        label = (f"gait=pinch (fingers+forearm)  grip={args.grip:.2f}  "
+                 f"sweep={args.pinch_sweep:.2f}  roll_to={np.degrees(args.roll_to):.0f} deg")
+    elif args.gait == "roll":
+        gait, ctrl, res = roll_gait(grip=args.grip, cycles=args.cycles,
+                                    roll_to=args.roll_to, steps=phase_steps)
+        label = (f"gait=roll (forearm only)  grip={args.grip:.2f}  "
+                 f"roll_to={np.degrees(args.roll_to):.0f} deg")
+    else:
+        gait, ctrl, res = run(fingers, args.grip, args.twist, args.release, args.cycles,
+                              args.use_wrist, args.grip_z, phase_steps)
+        label = (f"gait=finger (no forearm)  fingers={'+'.join(fingers)}  grip={args.grip:.2f}  "
+                 f"twist={np.degrees(args.twist):.0f} deg  release={args.release*1e3:.0f} mm  "
+                 f"wrist={'free' if args.use_wrist else 'frozen'}")
     period = sum(phase_steps)
     per_cycle = np.degrees(res["angle"][period - 1::period])
-    print(f"fingers={'+'.join(fingers)}  grip={args.grip:.2f}  "
-          f"twist={np.degrees(args.twist):.0f} deg  release={args.release*1e3:.0f} mm  "
-          f"cycles={args.cycles}x{period} steps  "
-          f"wrist={'free' if args.use_wrist else 'frozen'}")
+    print(f"{label}  cycles={args.cycles}x{period} steps")
     secs = period * args.cycles * CTRL_DT
     print(f"  cap rotation           {res['total_deg']:+.2f} deg over {secs:.1f} s "
           f"({res['total_deg']/secs:+.1f} deg/s)")
