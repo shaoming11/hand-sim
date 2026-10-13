@@ -158,7 +158,7 @@ def score(env: CapTurn, traj: dict) -> dict:
             **{f"term/{k}": float(v) for k, v in aux["terms"].items()},
             **{k: float(aux[k]) for k in (
                 "d_theta", "thumb_gap", "index_gap", "opposition", "pinch", "bottle",
-                "tracked", "grind", "d_roll",
+                "tracked", "finger_carried", "grind", "d_roll",
             )},
             "thumb_sweep": float(aux["sweep"][0]),
             "index_sweep": float(aux["sweep"][1]),
@@ -192,6 +192,14 @@ def score(env: CapTurn, traj: dict) -> dict:
         "tracked_rotation_deg": float(np.degrees(trace["tracked"].sum())),
         "tracked_fraction": float(trace["tracked"].sum() / gross) if gross > 0 else 0.0,
         "grind_deg": float(np.degrees(trace["grind"].sum())),
+        # M8: of the rotation the pads carried, the share they carried while the forearm was
+        # still. The reward pays either route equally by design, so this is what says which one
+        # a trajectory used.
+        "finger_carried_deg": float(np.degrees(trace["finger_carried"].sum())),
+        "finger_share": (
+            float(trace["finger_carried"].sum() / trace["tracked"].sum())
+            if trace["tracked"].sum() > 1e-9 else 0.0
+        ),
         "thumb_sweep_median_deg": float(np.degrees(np.median(trace["thumb_sweep"]))),
         "index_sweep_median_deg": float(np.degrees(np.median(trace["index_sweep"]))),
         "pinch_median": float(np.median(trace["pinch"])),
@@ -220,6 +228,8 @@ def report(name: str, label: str, res: dict, per_step: bool = False) -> None:
     print(f"  pad sweep about the cap axis, median: thumb "
           f"{res['thumb_sweep_median_deg']:+.1f} deg/s, index {res['index_sweep_median_deg']:+.1f} deg/s")
     print(f"  cap rotation per degree of forearm travel: {res['rotation_per_roll']:.3f}")
+    print(f"  carried by the fingers (forearm still): {res['finger_carried_deg']:.1f} deg "
+          f"= {res['finger_share']*100:.0f}% of what the pads carried")
     print(f"  pinch med {res['pinch_median']:.3f}   opposition med {res['opposition_median']:+.3f}   "
           f"gaps th/ff {res['thumb_gap_mm']:.2f}/{res['index_gap_mm']:.2f} mm   "
           f"bottle on {res['bottle_steps']*100:.1f}% of steps")

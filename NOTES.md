@@ -2737,6 +2737,56 @@ three live only in the slow tier, which is why they went unnoticed for a milesto
   when the next episode starts. Measured, steps 1 onward *are* bit-identical and only step 0
   differs, by 3e-3 rad. The test now pins the documented bound instead of over-asserting.
 
+### The route is unobservable from the return, so it is now a metric
+
+The reward pays a non-slipping carry equally whether the fingers or the forearm produced it. That
+is deliberate -- it states what counts as turning the cap, not how to do it, and M7 is the
+cautionary tale for prescribing the how. But it means **the route cannot be read from the
+return**, and worse, the most forearm-driven gait is also the best-scoring one: `roll_gait` at
+grip 0.60 earns +1.073/s against the reference's +0.861. A training run where the arm does
+everything would look identical to one where the hand does.
+
+So `finger_carried_rotation` is added: of the rotation the pads carried, the part they carried
+while the forearm was still (`|d_roll|` under `forearm_still_deg = 1.0` per control step, an
+order of magnitude below the 9 deg/step a stroke reaches). A metric, not a term -- nothing in the
+reward reads it. `train.py` prints it as `fingers NN%` and `score_reward.py` as a line of its own.
+
+Validated at both ends, which is what makes it trustworthy:
+
+| gait | reward/s | pads carried | **carried with the forearm still** |
+|---|---|---|---|
+| M1 finger gait (no forearm at all) | +0.165 | 79.5% | **100%** |
+| `roll_gait`, grip 0.60 | +1.073 | 84.1% | **9%** |
+| `pinch_twist`, 0.50/0.35 | +0.861 | 90.3% | **6%** |
+
+### What actually sets the fingers-vs-forearm balance: not the reward
+
+Worth stating because the obvious next move -- add a term that favours the fingers -- is the M7
+mistake again. Measured, the balance is set by `rh_WRJ0`'s *range*, which M7 chose as 100 deg so
+that one stroke is about 90 deg of cap:
+
+| roll range | `roll_gait` cap deg | reward/s | rotation with the forearm still |
+|---|---|---|---|
+| 90 deg | +1107 | +1.073 | 17% |
+| 45 deg | +824 | +0.776 | 36% |
+| 30 deg | +733 | +0.667 | 45% |
+
+(Percentages here are of *total* cap rotation rather than of the carried part, which is why they
+exceed the table above.) Two things follow. Restricting the forearm does shift the work onto the
+fingers, 17% to 45% -- but it does so by making the *pronation* gait finger-driven, through its
+squeeze phase, not by making `pinch_twist` competitive. `pinch_twist` loses at every roll range.
+
+Which also means the honest reading of `sweep_offset` is that it is a **weak idea for a script**:
+it spends grip to buy tangential travel, and grip is what stops the roll slipping. The finger
+contribution in the gaits that work comes from the squeeze. It is kept as the reference because
+it is the only scripted trajectory that moves the fingers tangentially on purpose, which is what
+the reward change needs a witness for -- not because it is the best gait on this hand.
+
+The open design question is therefore a *task* question, not a reward one: how much forearm
+pronation should this task allow? 100 deg makes pronation sufficient on its own and the task
+easiest; 30 deg forces the fingers to carry about half. That is a decision about what is being
+asked for, and it is not settled here.
+
 ### Still to do
 
 1. **Retrain three seeds.** Nothing from M6 or M7 transfers: the reward, the pose and the mount

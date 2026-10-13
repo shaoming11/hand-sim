@@ -314,6 +314,37 @@ def test_the_reference_gait_is_not_punished_by_any_cost_term(reference):  # noqa
     )
 
 
+def test_the_finger_share_metric_reads_the_route_not_the_score(
+    reference, roll_only, finger_gait
+):
+    """`finger_carried_rotation` has to separate the two routes, because nothing else does.
+
+    The reward pays a non-slipping carry equally whether the fingers or the forearm produced it,
+    deliberately -- it states what counts as turning the cap, not how to do it. That makes the
+    route unobservable from the return, and a training run where the arm does everything would
+    look identical to one where the hand does. This metric is the instrument: of the rotation the
+    pads carried, the share they carried while the forearm was still.
+
+    Pinned at both ends. The M1 gait never rolls the forearm at all, so it must read ~100%; the
+    pronation gaits must read low. If this ever stops discriminating, the first training run
+    becomes unreadable, which is the failure M6 built `score_reward.py` to stop repeating.
+    """
+    assert finger_gait["finger_share"] > 0.95, (
+        "a gait with no forearm motion must credit the fingers with all of it: "
+        f"{finger_gait['finger_share']*100:.0f}%"
+    )
+    for name, res in (("fingers + forearm", reference), ("forearm only", roll_only)):
+        assert res["finger_share"] < 0.5, (
+            f"{name} is forearm-driven and must read as such: {res['finger_share']*100:.0f}%"
+        )
+    # and it is not just the reward in disguise -- the lowest finger share scores *highest*
+    assert roll_only["finger_share"] < finger_gait["finger_share"]
+    assert roll_only["per_second"] > finger_gait["per_second"], (
+        "the point of a separate metric: the most forearm-driven gait is also the best-scoring "
+        "one, so the return cannot be used to read the route"
+    )
+
+
 @slow
 def test_the_finger_motion_makes_the_gait_robust_to_grip():
     """Why the finger contribution is worth having, stated as the thing that actually holds.

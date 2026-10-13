@@ -132,6 +132,20 @@ def default_config() -> config_dict.ConfigDict:
             # anything beyond that is the fingers spinning it, which is the M6 behaviour this
             # milestone exists to stop paying for.
             no_slip_ratio=1.0,
+            # M8: below this much forearm travel in one control step, the forearm counts as
+            # stationary and any rotation the pads carried over that step is credited to the
+            # *fingers*. A metric, not a term -- nothing in the reward reads it.
+            #
+            # It exists because the reward is deliberately indifferent to *how* the cap is
+            # carried, and that indifference has to be observable or the first training run
+            # cannot be read. Measured on the scripted gaits, the finger share moves from 17%
+            # at a 90 deg roll range to 45% at 30 deg, so it is a real and sizeable quantity
+            # that `roll_travel` and `tracked_rotation` between them cannot express: both are
+            # totals, and neither says which joints produced the carry.
+            #
+            # 1 deg/step against a stroke that moves the forearm 9 deg/step at its fastest, so
+            # "still" means an order of magnitude below the stroke rate rather than exactly zero.
+            forearm_still_deg=1.0,
             # M6: where the opposition factor saturates, in degrees of azimuth between the two
             # grasp surfaces. 180 is wrong and the pregrasp fit measured why: at 180 one finger
             # has to reach across to the far side of the cap, where the bottle neck is, and

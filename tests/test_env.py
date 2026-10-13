@@ -203,6 +203,7 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "slip_rotation",  # -> radians the pinch did not produce
         "thumb_sweep_per_step",  # -> how fast each pad went round the cap axis ...
         "index_sweep_per_step",  # ... which is where "the index finger straightens" shows up
+        "finger_carried_rotation",  # -> radians the pads carried with the forearm still
     } <= set(state.metrics), "M8: the numbers that say whether the motion is human"
 
 

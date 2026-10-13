@@ -503,6 +503,13 @@ def main(argv: list[str] | None = None) -> None:
         carried = metrics.get("eval/episode_tracked_rotation")
         if carried is not None and gross is not None and float(gross) > 1e-9:
             line.append(f"carried {float(carried) / float(gross) * 100:5.1f}%")
+        # M8: and of what the pads carried, the share carried while the forearm was still. The
+        # reward pays either route equally on purpose, so this is the only number that says
+        # whether the hand is turning the cap or the arm is. Scripted gaits read 17% at a 90 deg
+        # roll range and 45% at 30 deg.
+        fingers = metrics.get("eval/episode_finger_carried_rotation")
+        if fingers is not None and carried is not None and float(carried) > 1e-9:
+            line.append(f"fingers {float(fingers) / float(carried) * 100:5.1f}%")
         for key, label, fmt in (
             ("eval/episode_roll_travel", "roll", "{:5.1f}"),
             ("eval/episode_thumb_sweep_per_step", "th/s", "{:+6.2f}"),

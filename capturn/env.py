@@ -325,6 +325,10 @@ class CapTurn(mjx_env.MjxEnv):
         # A gait that straightens the index finger shows up here and nowhere else.
         metrics["thumb_sweep_per_step"] = jp.zeros(())
         metrics["index_sweep_per_step"] = jp.zeros(())
+        # M8: `finger_carried_rotation / tracked_rotation` is the headline for *how human* the
+        # motion is, as opposed to how well it scores. The reward pays either route equally on
+        # purpose, so this is the only thing that says which one a policy picked.
+        metrics["finger_carried_rotation"] = jp.zeros(())
         metrics["pinch_per_step"] = jp.zeros(())
         metrics["bottle_intrusion_per_step"] = jp.zeros(())
 
@@ -381,6 +385,7 @@ class CapTurn(mjx_env.MjxEnv):
         state.metrics["grind_rotation"] = aux["grind"]
         state.metrics["thumb_sweep_per_step"] = aux["sweep"][0]
         state.metrics["index_sweep_per_step"] = aux["sweep"][1]
+        state.metrics["finger_carried_rotation"] = aux["finger_carried"]
         state.metrics["roll_travel"] = jp.abs(aux["d_roll"])
         state.metrics["slip_rotation"] = terms["slip"] * self.dt
         state.metrics["pinch_per_step"] = pinch
@@ -467,6 +472,11 @@ class CapTurn(mjx_env.MjxEnv):
         # Reported, not paid. The roll is one way to produce `sweep` and no longer a term.
         roll = data.qpos[self._roll_qid]
         d_roll = roll - info["last_roll"]
+        # M8: and which way it *was* produced. `tracked` credited to the fingers is the part of
+        # it the pads carried while the forearm was not moving -- the one number that separates
+        # "the hand turned the cap" from "the arm did". See `forearm_still_deg`.
+        forearm_still = jp.abs(d_roll) < math.radians(rcfg.forearm_still_deg)
+        finger_carried = tracked * forearm_still
 
         # M5: a gait *has* to let go to regrip, so losing contact for an instant is not a
         # failure -- terminating on it would end the M1 gait on 15% of its own steps. What
@@ -493,6 +503,7 @@ class CapTurn(mjx_env.MjxEnv):
             "bottle": bottle,
             "pinch": pinch,
             "tracked": tracked,
+            "finger_carried": finger_carried,
             "grind": grind,
             "sweep": sweep,
             "d_roll": d_roll,
