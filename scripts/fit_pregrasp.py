@@ -93,7 +93,7 @@ IDLE_RADIUS = 0.030  # keep ring/little tips at least this far off the cap axis 
 TIP_OPPOSITION = 2.60  # target azimuthal separation between the two pinch tips [rad]
 IK_MARGIN = 0.01  # temporary geom margin, so near-contacts are visible to the fitter [m]
 
-# M7: the pregrasp belongs at the *top* of the usable roll range. The stroke runs 0 -> -90 deg,
+# M7: the pregrasp belongs at the *top* of the usable roll range. The stroke runs 0 -> -45 deg,
 # so a pose fitted at -45 would throw away half of it. Pinned rather than bounded, because the
 # optimiser has every incentive to buy clearance by starting part-way through the stroke.
 ROLL_NEUTRAL = 0.0

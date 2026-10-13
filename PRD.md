@@ -215,13 +215,23 @@ stage froze the hand's mount, which is the one variable that decides how far it 
 now sit near the cap's mid-band with ~3 mm to squeeze through, and the gait's bottle contact goes
 from 91 of 220 steps to 0 of 264.
 
-Costs, stated plainly: the reward, the pose and the mount all changed, so all three seeds need
-retraining again. And one thing M8 does *not* deliver — the open-loop reference gait still does
-not demonstrate a finger-driven stroke. It realizes 25 deg of the 42 deg of index extension asked
-of it, and 13% of its rotation happens with the forearm still, no better than the pure-pronation
-gait's 17%. A fixed envelope has to split one actuator budget between gripping and sweeping on a
-pre-set schedule; the motion needs both at once, which means closed-loop grip modulation. That is
-now a question for training rather than a question about the reward. See NOTES.md, M8.
+**And `rh_WRJ0`'s range narrows from 90 deg to 45.** This revises the M7 range above, and it is
+the change that actually makes the fingers work. The reward is deliberately indifferent to *which
+joints* turn the cap — it says what counts as turning it, and M7 is the cautionary tale for
+saying more — so the share the fingers carry has to come from the morphology. At 90 deg one
+stroke turns the cap 92 deg, pronation finishes 4*pi in under 8 strokes, and the scripted gait
+carries 9% of its rotation on the fingers. At 45 deg it carries **26%**. Swept, 45 is the
+smallest range that keeps the trajectory clean: the carried fraction sits on a plateau down to
+45 and falls away below it, because a shorter stroke means more regrips per degree and the
+regrip is where slip happens. 4*pi now needs about 11 strokes against the 54 an episode allows.
+
+Costs, stated plainly: the reward, the pose, the mount and the roll range all changed, so all
+three seeds need retraining again. And one thing M8 does *not* deliver — no *scripted* gait
+demonstrates a finger-driven stroke. Explicitly sweeping the pads tangentially buys 4 points of
+finger share for 11 points of slip, because a fixed envelope has to split one actuator budget
+between gripping and sweeping on a pre-set schedule, and grip is what stops the roll slipping.
+The motion needs both at once, which means closed-loop grip modulation. That is a question for
+training rather than a question about the reward. See NOTES.md, M8.
 
 **Termination.** NaN in qpos or qvel. All gaiting fingertips more than 10 cm from the cap, or the grasp lost for `grasp_grace_steps` consecutive steps. Otherwise fixed length.
 

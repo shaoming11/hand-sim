@@ -2683,16 +2683,19 @@ training has to show. The reward no longer stands in its way, which is what M8 a
 
 ### Buffers and parity, re-probed on the new pose
 
-| | `pinch_twist` | configured |
+Re-probed again after the roll range was narrowed, on the reference gait it changed to:
+
+| | `roll_gait` grip 0.60, 45 deg | configured |
 |---|---|---|
-| `ncollision` max | 14 | -- |
-| `nefc` max | 46 | -- |
-| `naconmax` / world at 2x | 28 | 48 |
-| `njmax` / world at 2x | 92 | 150 |
+| `ncollision` max | 16 | -- |
+| `nefc` max | 42 | -- |
+| `naconmax` / world at 2x | 32 | 48 |
+| `njmax` / world at 2x | 84 | 150 |
 
 Both inside, with more headroom than M7 had (which needed 36 and 98). Parity is the best in the
-project: **0.0%**, CPU +742.41 deg against warp +742.53, worst gap along the trajectory 0.5%, no
-overflow flags. The `sim_dt` halving check is 0.3%. M2 criteria all PASS.
+project: **0.0%** on both criteria -- CPU +823.94 deg against warp +823.94, worst gap along the
+trajectory 0.0%, and the `sim_dt` halving check also 0.0%. No overflow flags. M2 criteria all
+PASS.
 
 The `cvel` dependency is worth noting because it is new: the reward now reads `data.cvel` and
 `data.subtree_com`, and the Warp backend does populate both — checked, not assumed, and the
@@ -2783,9 +2786,69 @@ it is the only scripted trajectory that moves the fingers tangentially on purpos
 the reward change needs a witness for -- not because it is the best gait on this hand.
 
 The open design question is therefore a *task* question, not a reward one: how much forearm
-pronation should this task allow? 100 deg makes pronation sufficient on its own and the task
-easiest; 30 deg forces the fingers to carry about half. That is a decision about what is being
-asked for, and it is not settled here.
+pronation should this task allow?
+
+### Settled: the forearm roll is narrowed to 45 deg
+
+`rh_WRJ0` goes from -90..+10 to **-45..+10**. Swept with everything else fixed, on `roll_gait`
+at grip 0.60:
+
+| range | cap/cycle | reward/s | carried | finger share | strokes to 4*pi |
+|---|---|---|---|---|---|
+| -90 | 92.3 | +1.073 | 84% | **9%** | 7.8 |
+| -60 | 79.5 | +0.828 | 78% | 13% | 9.1 |
+| **-45** | **68.7** | **+0.776** | **79%** | **26%** | **10.5** |
+| -30 | 61.1 | +0.667 | 71% | 33% | 11.8 |
+| -20 | 54.8 | +0.231 | 67% | 38% | 13.1 |
+
+-45 is the smallest range that still keeps the trajectory clean. `carried` sits on a plateau
+down to -45 and then falls away, because a shorter stroke means more release-and-regrip cycles
+per degree of cap and the regrip is where slip happens; below -45 the finger share is bought
+with slip rather than with finger work, which is not the trade wanted. 4*pi needs about 11
+strokes rather than 8, far inside the 54 an episode allows.
+
+**And it does what `sweep_offset` could not.** At -45 the *pronation* gait already carries 26% of
+its rotation on the fingers -- through its squeeze phase -- against 9% at -90. Explicitly
+sweeping the pads tangentially buys 30% but costs return (+0.644 against +0.776) and slip
+(carried 68% against 79%): 4 points of finger share for 11 points of slip. So the morphology
+change achieved what the gait design could not, which is the cleaner result anyway -- the reward
+stays a statement of the objective and the hand's limits do the shaping.
+
+`roll_gait` at grip 0.60 is therefore the reference gait again, and `pinch_twist` is demoted to
+what it actually is: the one scripted trajectory that moves the pads tangentially on purpose, a
+witness for the reward change, and a demonstration of robustness. That last claim is the one
+that strengthens at -45 -- `roll_gait` across grip 0.40-0.80 reads +140, +540, +824, +18, +19,
+falling off a cliff above 0.60, while the finger sweep reads +154, +434, +800, +542, +536.
+
+Timestep convergence is also best here: halving `sim_dt` moves `roll_gait` at grip 0.60 by
+**0.0%**, the cleanest trajectory the project has, so both parity entry points now replay it.
+
+### Where the reference gait's costs actually go, and an overlap worth watching
+
+The cost guard had to come from 3x to 2.5x, and the breakdown says why -- it is not the regrips:
+
+| phase | steps | `slip` | `grind` | pinch | cap deg |
+|---|---|---|---|---|---|
+| squeeze | 48 | -0.262 | -0.454 | 0.680 | +175.4 |
+| turn | 120 | **-1.161** | -0.480 | 0.587 | +648.5 |
+| release | 24 | -0.000 | -0.001 | 0.497 | +0.1 |
+| reset | 72 | -0.000 | -0.000 | 0.192 | -0.1 |
+
+Release and reset are free: the cap stops cleanly when the pinch opens, so a shorter stroke
+costs nothing for regripping more often. Everything accrues during the stroke, and nearly all of
+it is `slip`, which charges `(1 - pinch) * |d_theta|`. The script holds a pinch of 0.587 -- one
+pad about 5 mm off the cap through the turn -- so 41% of its rotation is charged on grip quality
+alone. That is the script's grip being mediocre rather than a cost term misfiring, and a policy
+holding a tighter pinch pays almost none of it.
+
+But it also exposes an overlap that M8 created and did not resolve. `slip` was the pre-M8 *proxy*
+for "rotation the grip did not produce", inferred from grip quality because nothing measured the
+thing directly. `grind` now measures it directly. This gait is the case that shows the seam: its
+pads demonstrably carry **79%** of the rotation, and `slip` charges **41%** of it anyway. The two
+terms are pricing the same defect by different routes, and `slip` is the cruder one. Left alone
+before the first training run rather than churned -- but if a trained policy's `slip` turns out
+to dominate its return while its carried fraction is high, that is this, and the fix is to narrow
+`slip` to the ungrasped case it was really for.
 
 ### Still to do
 

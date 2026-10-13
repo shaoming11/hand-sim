@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from scripts import squeeze_twist  # noqa: E402
 from scripts.view_scene import GAIT_TIPS, cap_surface_distance, load  # noqa: E402
 
 REACH_TOLERANCE = 0.010  # PRD M0: gaiting fingertips within about 1 cm of the cap rim
@@ -39,10 +40,21 @@ def test_scene_loads_with_expected_shape(scene):
     assert abs(roll.axis[2]) == 1.0 and roll.axis[0] == 0.0 and roll.axis[1] == 0.0, (
         "pronation is about the forearm's own long axis, which is local z here"
     )
-    # The range is load-bearing, not cosmetic: 4*pi of cap rotation cannot be reached in fewer
-    # than ceil(4*pi / (2 * 1.3963)) = 5 strokes, so releasing and regripping is enforced by the
-    # geometry rather than by a reward term.
-    assert float(roll.range[1] - roll.range[0]) < 2 * 3.15, "a full turn must not fit in one roll"
+    # The range is load-bearing, not cosmetic, and M8 made it more so. It is the only thing that
+    # decides how much of this task the forearm may do: the reward states what counts as turning
+    # the cap, deliberately not which joints may do it, so the share the fingers carry has to
+    # come from the morphology. At the M7 range of -90 deg the scripted gait carried 9% of the
+    # rotation on its fingers; at -45 it carries 26%. NOTES.md, M8.
+    lo, hi = float(roll.range[0]), float(roll.range[1])
+    assert hi - lo < 2 * 3.15, "a full turn must not fit in one roll"
+    assert lo == pytest.approx(-0.785398, abs=1e-5), (
+        "M8: the usable end of the roll is -45 deg. Widening it hands the task back to the "
+        f"forearm -- read {lo:.4f} rad"
+    )
+    # And the scripted stroke has to be the range, or the reference gaits stop exercising it.
+    assert squeeze_twist.ROLL_TO == pytest.approx(lo, abs=1e-5), (
+        f"scripts/squeeze_twist.ROLL_TO is {squeeze_twist.ROLL_TO}, the joint stops at {lo}"
+    )
     assert model.body("bottle").jntnum[0] == 0, "bottle is fixed in place"
     assert model.joint("cap_hinge").type[0] == mujoco.mjtJoint.mjJNT_HINGE
 

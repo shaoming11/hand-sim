@@ -83,8 +83,16 @@ reward measures the nearest point of the collision *geoms*, and its settled stag
 hand's mount, the one variable that decides how far it sags (settled cost 470 -> **5.69** once
 freed). Both pads now sit near the cap's mid-band with ~3 mm of clearance, pad separation 148.9
 deg against a 149 target, and the reference gait touches the bottle on **0** of 264 steps where
-it used to on 91 of 220. Parity is **0.0%**. Still nothing trained. Details in
-[`NOTES.md`](NOTES.md), M8.
+it used to on 91 of 220.
+
+**And `rh_WRJ0`'s range narrows 90 deg -> 45.** The reward is deliberately indifferent to which
+joints turn the cap, so the fingers' share has to come from the morphology. At 90 deg one stroke
+turns the cap 92 deg and the scripted gait carries 9% of its rotation on the fingers; at 45 deg
+it carries **26%**. 45 is the smallest range that keeps the trajectory clean -- below it the
+finger share is bought with slip rather than finger work. This did what an explicitly
+finger-sweeping gait could not: that gait buys 4 points of finger share for 11 points of slip,
+because gripping and sweeping draw on the same actuators. Parity is **0.0%** on both criteria.
+Still nothing trained. Details in [`NOTES.md`](NOTES.md), M8.
 
 ## Setup (Mac, CPU)
 

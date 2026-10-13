@@ -23,17 +23,18 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 from scripts.check_parity import build_model, cpu_rollout  # noqa: E402
-from scripts.squeeze_twist import CTRL_DT, OpenLoopGait  # noqa: E402
+from scripts.squeeze_twist import CTRL_DT  # noqa: E402
 
 TOLERANCE = 0.10  # PRD: "about 10%"
 # M8: the *current* reference gait, not M1's. This was `squeeze_twist.npz` and the swap is not
 # cosmetic -- on the re-fitted pose the M1 finger gait at its M5-tuned grip of 0.35 is no longer
 # timestep-converged (halving `sim_dt` moves it from +153 to +60 deg, 61%), because that grip is
 # marginal on a pose where the index pad is no longer wedged against the cap's bottom lip. It is
-# the gait parameters, not the scene: the same gait at grip 0.50 converges to 3.7% and at 0.65 to
-# 0.1%, and all three M8 reference gaits converge to 0.1-0.3%. A marginal trajectory is a bad
-# instrument for a convergence test, and parity belongs on the gait the project actually uses.
-TRAJECTORY = ROOT / "artifacts" / "pinch_twist.npz"
+# the gait parameters, not the scene: the same gait converges to 3.7% at grip 0.50 and 0.1% at
+# 0.65. A marginal trajectory is a bad instrument for a convergence test, and parity belongs on
+# the gait the project actually uses -- which at the 45 deg roll range is `roll_gait` at grip
+# 0.60, the cleanest trajectory the project has: halving `sim_dt` moves it by 0.0%.
+TRAJECTORY = ROOT / "artifacts" / "roll_gait.npz"
 
 slow = pytest.mark.skipif(
     not os.environ.get("HAND_SIM_SLOW"),
@@ -45,9 +46,9 @@ slow = pytest.mark.skipif(
 def trajectory():
     if not TRAJECTORY.exists():
         pytest.skip(
-            f"{TRAJECTORY} missing -- run: python3 scripts/squeeze_twist.py --gait pinch "
-            "--grip 0.50 --pinch-sweep 0.35 --cycles 12 --phase-steps 4,10,2,6 "
-            "--out artifacts/pinch_twist.npz"
+            f"{TRAJECTORY} missing -- run: python3 scripts/squeeze_twist.py --gait roll "
+            "--grip 0.60 --cycles 12 --phase-steps 4,10,2,6 "
+            "--out artifacts/roll_gait.npz"
         )
     npz = np.load(TRAJECTORY)
     return npz["ctrl"], int(npz["n_substeps"])

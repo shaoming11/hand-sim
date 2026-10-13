@@ -74,6 +74,12 @@ FINGER_ACTUATORS = {
 }
 
 
+# M8: a full stroke, i.e. the bottom of `rh_WRJ0`'s range. Was -90 deg; the range was narrowed
+# to -45 so that the forearm cannot do the whole task on its own. Read from nothing -- it has to
+# match the model, and `test_the_stroke_matches_the_joint_range` checks that it does.
+ROLL_TO = -0.785398
+
+
 def ease(t: np.ndarray) -> np.ndarray:
     """Smooth 0->1 ramp, so the open-loop targets do not step discontinuously."""
     return 0.5 - 0.5 * np.cos(np.pi * np.clip(t, 0.0, 1.0))
@@ -331,7 +337,7 @@ class OpenLoopGait:
         }
 
 
-def roll_gait(grip: float = 0.5, cycles: int = 10, roll_to: float = -1.5708,
+def roll_gait(grip: float = 0.5, cycles: int = 10, roll_to: float = ROLL_TO,
               steps: tuple[int, int, int, int] = (4, 10, 2, 6)):
     """M7: the pronation gait -- grip, roll the forearm, release, roll back. Repeat.
 
@@ -373,7 +379,7 @@ def roll_gait(grip: float = 0.5, cycles: int = 10, roll_to: float = -1.5708,
 
 
 def pinch_twist(grip: float = 0.5, sweep: float = 0.35, cycles: int = 10,
-                roll_to: float = -1.5708, steps: tuple[int, int, int, int] = (4, 10, 2, 6)):
+                roll_to: float = ROLL_TO, steps: tuple[int, int, int, int] = (4, 10, 2, 6)):
     """M8: the human motion -- grip, then turn the cap with the *fingers and* the forearm.
 
     `roll_gait` (M7) holds a fixed pinch and lets `rh_WRJ0` do all the work. That is not how a
@@ -472,7 +478,7 @@ def main() -> None:
     ap.add_argument("--gait", default="pinch", choices=("pinch", "roll", "finger"))
     ap.add_argument("--pinch-sweep", type=float, default=0.35,
                     help="--gait pinch: fraction of pinch travel spent turning rather than gripping")
-    ap.add_argument("--roll-to", type=float, default=-1.5708,
+    ap.add_argument("--roll-to", type=float, default=ROLL_TO,
                     help="--gait pinch/roll: forearm roll at the end of a stroke [rad]")
     ap.add_argument("--grid", action="store_true",
                     help="--gait pinch: print the grip x sweep grid instead of a rollout")

@@ -31,17 +31,37 @@
              and settling at each roll angle, the pose is clean from -90 deg up to 0 and the hand
              starts catching the bottle from +15 deg on (1-2 bottle contacts, rising to -0.144 mm
              of penetration by +60). A symmetric +-80 deg was wrong both ways: 80 deg of it was
-             unreachable and it clipped 10 deg of good travel. So -90 deg to +10.
-             This range is doing structural work. An 80 deg roll turns the cap +74 deg net of the
-             grip-ramp baseline (cap/roll ~ 0.93, which is what a non-slipping grip should give),
-             so 4*pi cannot be reached in fewer than about 9 strokes and the release-and-regrip
-             cycle is enforced by geometry rather than by `stroke_budget`.
+             unreachable and it clipped 10 deg of good travel. The clean envelope is -90 to +10.
+             M8 narrows the *usable* end of it to -45, and that is the single number deciding
+             how much of this task the forearm is allowed to do.
+             At -90 one stroke turns the cap about 92 deg, so pronation alone finishes 4*pi in
+             under 8 strokes and the fingers are very nearly spectators -- measured on the
+             scripted gait, 9% of the rotation the pads carried. That is the behaviour the
+             reward cannot and should not forbid (it states what counts as turning the cap, not
+             which joints may do it -- see NOTES.md M7 for what happens when it tries), so the
+             morphology has to be what asks for the fingers.
+             Swept, with everything else fixed:
+                 range   cap/cycle   carried   finger share
+                 -90        92.3       84%          9%
+                 -60        79.5       78%         13%
+                 -45        68.7       79%         26%
+                 -30        61.1       71%         33%
+                 -20        54.8       67%         38%
+             -45 is the smallest range that still keeps the trajectory clean. `carried` -- the
+             fraction of cap rotation the pads took without slipping -- sits on a plateau down
+             to -45 and then falls away, because a shorter stroke means more release-and-regrip
+             cycles per degree of cap, and the regrip is where slip happens. Below -45 the
+             finger share is bought with slip rather than with finger work, which is not the
+             trade wanted. The scripted gait cannot use the fingers well (NOTES.md M8), so 26%
+             is a floor on what a policy should manage here, not a target.
+             4*pi now needs about 11 strokes rather than 8, still far inside the 54 the episode
+             allows, so the task stays comfortably solvable.
              kp 20 / 10 N*m is above the wrist joints because this one swings the whole hand;
              human pronation torque is 5-10 N*m. Armature 0.001 against the forearm's own
              0.00744 kg*m^2 about z is a plausible geared rotor and keeps the hinge stiff. -->
         <default class="wrist_roll">
-          <joint axis="0 0 1" range="-1.570796 0.174533" armature="0.001"/>
-          <position kp="20" ctrlrange="-1.570796 0.174533" forcerange="-10 10"/>
+          <joint axis="0 0 1" range="-0.785398 0.174533" armature="0.001"/>
+          <position kp="20" ctrlrange="-0.785398 0.174533" forcerange="-10 10"/>
         </default>
       </default>
 
