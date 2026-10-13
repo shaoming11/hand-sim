@@ -2698,6 +2698,45 @@ The `cvel` dependency is worth noting because it is new: the reward now reads `d
 `data.subtree_com`, and the Warp backend does populate both — checked, not assumed, and the
 parity run above exercises it.
 
+**The parity trajectory had to change, and the reason is a real finding.** `tests/test_parity.py`
+and `scripts/check_parity.py` replayed `squeeze_twist.npz`, the M1 finger gait at grip 0.35. On
+the re-fitted pose that trajectory is **not timestep-converged**: halving `sim_dt` moves it from
++153 to +60 deg, 61%, against a 10% tolerance. It is the gait parameters and not the scene —
+measured on the same pose, the same gait converges to 3.7% at grip 0.50 and 0.1% at 0.65, and all
+three M8 reference gaits converge to 0.1–0.3%:
+
+| gait | coarse | halved `sim_dt` | |
+|---|---|---|---|
+| finger gait, grip 0.35 | +153.0 | +59.7 | **61.0%** |
+| finger gait, grip 0.50 | +51.1 | +49.2 | 3.7% |
+| finger gait, grip 0.65 | +137.6 | +137.7 | 0.1% |
+| `pinch_twist`, 0.50/0.35 | +742.4 | +740.2 | 0.3% |
+| `roll_gait`, grip 0.60 | +1107.2 | +1106.4 | 0.1% |
+
+Grip 0.35 was tuned at M5 for a pose that wedged the index pad 0.63 mm off the cap's bottom lip;
+with 3.5 mm of clearance and nothing to wedge against, that grip is marginal, and a marginal
+grip is where integration error decides whether the cap is carried or slips. Both parity entry
+points now replay `pinch_twist.npz`. Worth carrying forward as a caution rather than a fix: a
+*policy* that settles on a light grip would be training in the same timestep-sensitive regime,
+and `pinch` is the metric that would show it.
+
+### Three stale constants in the slow test tier, since M7
+
+Found by running `HAND_SIM_SLOW=1` over the whole suite, which had not been done since the joint
+was added. All three were pre-M7 counts that M7 updated in one place and not another, and all
+three live only in the slow tier, which is why they went unnoticed for a milestone:
+
+* `test_vmap_over_envs` asserted an observation width of 210 against the current 219 — M7
+  updated the identical constant in `test_observation_sizes_are_the_documented_ones`, whose
+  comment reads "M7: 210 -> 219". Now derived from `history_len * FRAME_SIZE`.
+* `test_smoke_train_then_eval_produces_a_loadable_policy` asserted `qpos` width 25 against the
+  current 26. Now read from the model.
+* `test_episode_boundary_does_not_leak_rotation_or_targets` asserted that a whole episode repeats
+  bit-for-bit across an auto-reset. It cannot, and `CapTurn.reset` says so: `full_reset=False`
+  restores `data` and leaves `info` alone, so `last_cap_angle` and `last_roll` are one step stale
+  when the next episode starts. Measured, steps 1 onward *are* bit-identical and only step 0
+  differs, by 3e-3 rad. The test now pins the documented bound instead of over-asserting.
+
 ### Still to do
 
 1. **Retrain three seeds.** Nothing from M6 or M7 transfers: the reward, the pose and the mount

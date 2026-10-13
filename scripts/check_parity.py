@@ -35,7 +35,9 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCENE = ROOT / "assets" / "scene.xml"
-DEFAULT_TRAJECTORY = ROOT / "artifacts" / "squeeze_twist.npz"
+# M8: the current reference gait. See the note in tests/test_parity.py -- the M1 finger gait at
+# grip 0.35 is not timestep-converged on the re-fitted pose.
+DEFAULT_TRAJECTORY = ROOT / "artifacts" / "pinch_twist.npz"
 
 HEADROOM = 2.0  # PRD: size the buffers from measured counts with 2x headroom
 PROBE_NACONMAX = 1024  # deliberately oversized while measuring

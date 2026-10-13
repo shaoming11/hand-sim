@@ -26,7 +26,14 @@ from scripts.check_parity import build_model, cpu_rollout  # noqa: E402
 from scripts.squeeze_twist import CTRL_DT, OpenLoopGait  # noqa: E402
 
 TOLERANCE = 0.10  # PRD: "about 10%"
-TRAJECTORY = ROOT / "artifacts" / "squeeze_twist.npz"
+# M8: the *current* reference gait, not M1's. This was `squeeze_twist.npz` and the swap is not
+# cosmetic -- on the re-fitted pose the M1 finger gait at its M5-tuned grip of 0.35 is no longer
+# timestep-converged (halving `sim_dt` moves it from +153 to +60 deg, 61%), because that grip is
+# marginal on a pose where the index pad is no longer wedged against the cap's bottom lip. It is
+# the gait parameters, not the scene: the same gait at grip 0.50 converges to 3.7% and at 0.65 to
+# 0.1%, and all three M8 reference gaits converge to 0.1-0.3%. A marginal trajectory is a bad
+# instrument for a convergence test, and parity belongs on the gait the project actually uses.
+TRAJECTORY = ROOT / "artifacts" / "pinch_twist.npz"
 
 slow = pytest.mark.skipif(
     not os.environ.get("HAND_SIM_SLOW"),
@@ -37,7 +44,11 @@ slow = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def trajectory():
     if not TRAJECTORY.exists():
-        pytest.skip(f"{TRAJECTORY} missing -- run scripts/squeeze_twist.py")
+        pytest.skip(
+            f"{TRAJECTORY} missing -- run: python3 scripts/squeeze_twist.py --gait pinch "
+            "--grip 0.50 --pinch-sweep 0.35 --cycles 12 --phase-steps 4,10,2,6 "
+            "--out artifacts/pinch_twist.npz"
+        )
     npz = np.load(TRAJECTORY)
     return npz["ctrl"], int(npz["n_substeps"])
 
