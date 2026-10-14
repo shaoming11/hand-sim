@@ -2850,6 +2850,113 @@ before the first training run rather than churned -- but if a trained policy's `
 to dominate its return while its carried fraction is high, that is this, and the fix is to narrow
 `slip` to the ungrasped case it was really for.
 
+### The first M8 training run: seed 1 at 150M, and the route it chose
+
+2026-10-14, an H200 (143 GiB, sm_90, driver 595.91.07, CUDA 12.9) on a fresh Daytona workspace.
+The image deviations from M6 all still hold -- no `git`, no `tmux`, no `rsync`, PEP 668
+externally-managed Python, torch 2.11.0+cu128 preinstalled, `MUJOCO_GL` left unset -- and the
+pinned stack resolved exactly to the M6 set (jax/jaxlib 0.11.2, mujoco 3.14.0, mujoco-mjx 3.14.0,
+warp-lang 1.17.0, brax 0.14.2, playground 0.2.0, flax 0.12.10). The only drift was
+orbax-checkpoint 0.12.7 against the recorded 0.12.6, which the compat shims' own tests cover.
+
+Pre-flight in the M6 order, all four green:
+
+| check | result |
+|---|---|
+| `pytest tests/` | **84 passed**, 15 skipped, 321 s |
+| `score_reward.py`, the three M8 gaits | **bit-identical to warp-CPU**: `roll_gait` +0.7757/s, `pinch_twist` +0.2833/s, `squeeze_twist` +0.1648/s, every term line matching to printed precision |
+| `check_parity.py` M2.1 / M2.2 / M2.3 | **0.0%** (CPU +823.94 deg vs warp +823.94), **0.0%** on the `sim_dt` halving, no overflow -- PASS |
+| `--probe` | `naconmax` 32 per world at 2x against 48 configured, `njmax` 84 against 150 |
+
+`score_reward.py` with no arguments no longer runs: the pre-M7 recordings in `artifacts/` have a
+20-wide action against the current 21 actuators, and `load()` dies on the broadcast. Only the
+three live gaits were scored. Either guard the width or delete the stale recordings.
+
+**The run.** 150,732,800 steps in **7,991 s (2.2 h)**, 18,771 steps/s overall -- that is with
+~124 s of eval in each of 24 cycles; training alone is ~26,200 steps/s against M3's 32,358
+benchmark. 23 checkpoints. No W&B key existed on this box, so checkpoints were pulled to the Mac
+by `tar` over ssh after each eval instead. The box auto-stopped after the run finished, exactly
+as the PRD's compute section describes, and the disk came back intact.
+
+| step | reward | success | net deg | net/gross | pads carried | fingers | forearm travel | pinch | opp |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 0.07 | 0% | 0.8 | 0.98 | 33.9% | 100.0% | 4.1 | 0.296 | 0.845 |
+| 19.7M | 23.45 | 57.6% | 1535.3 | 0.99 | 76.8% | 5.4% | 2537.6 | 0.721 | 0.874 |
+| 39.3M | 155.89 | 100% | 12230.8 | 1.00 | 81.3% | 0.0% | 6026.3 | 0.856 | 0.868 |
+| 98.3M | 93.92 | 100% | 13433.8 | 0.99 | 58.7% | 0.0% | 6082.0 | 0.707 | 0.856 |
+| 150.7M | 179.72 | 100% | 13220.0 | 0.99 | 84.1% | 0.0% | 5930.1 | 0.904 | 0.855 |
+
+**`eval.py`, 1024 deterministic episodes.** Success **100.00% +- 0.00** (1024/1024 reached
+720 deg), against the PRD's 80% -- **M5 criterion 1 PASS**. Net rotation +13,222.8 deg mean
+(36.7 turns), median +13,219.6, p10 +13,137, p90 +13,310: the distribution is tight enough that
+every episode is doing the same thing. net/gross +0.991. Drop rate 0.00%. Opposition +0.919
+median, **opposed on 100% of steps**; grasp term 0.927 median; thumb gap 0.08 mm and index gap
+0.28 mm, both within the 20 mm grasp-loss bound on 100% of steps. Deepest penetration
+**-0.170 mm**, against M1's -0.566 mm on CPU -- the cleanest contact the project has trained.
+
+**Parity on the policy's own trajectory, which is a check M5 never ran.** `eval.py` raised a
+`warp overflow ITERATIONS` flag across the 1024-episode batch, and every parity number before
+this one was measured on a *scripted* gait -- a different loading regime from a trained policy.
+`eval.py` saves `action`, not the `ctrl`/`n_substeps` `check_parity.py` replays, so the episode
+was converted by replaying the env's own delta integrator (a scratch script, not in the repo):
+
+| | |
+|---|---|
+| M2.1 | CPU **+13,156.42 deg** vs warp **+13,157.07** -- **0.0%**, worst gap along the trajectory 0.0% |
+| M2.2 | halving `sim_dt`: **0.0%** (worst gap 0.1%) -- timestep-converged, unlike the grip-0.35 trajectory M8 had to move parity off |
+| M2.3 | no overflow, solver used **8 of 50**, penetration CPU -0.300 mm / warp -0.147 mm |
+
+So the 13,220 deg is real physics, and the eval's overflow flag came from somewhere among the
+1024 noisier worlds rather than from this behaviour. **But the buffers moved**: this regime wants
+`njmax` **110** per world against the reference gait's 84 (150 configured) and `naconmax` 40
+against the gait's 32 (48 configured). Both still inside, with less margin than any gait
+measurement suggested -- the lesson from M5 and M6 restated once more, now in the other
+direction: *a trained policy loads the scene harder than any script used to size the buffers.*
+
+**Where the return comes from** (terms are weighted rates; the return is their sum times `dt`,
+so these are contributions to the +179.72):
+
+| term | contribution | | term | contribution |
+|---|---|---|---|---|
+| `twist` | **+189.44** | | `action_rate` | -2.64 |
+| `grind` | **-16.82** | | `slip` | -2.20 |
+| `grasp` | +8.13 | | `backdrive` | -1.03 |
+| `success` | +5.03 | | `torques` / `joint_vel` / `bottle` | -0.10 / -0.07 / -0.02 |
+
+**Both predictions in "Still to do" resolve, and they resolve opposite ways.**
+
+* *The `slip`/`grind` overlap did not bite.* M8 flagged that if a trained policy's `slip`
+  dominated its return while its carried fraction stayed high, that was the two terms pricing the
+  same defect. The carried fraction is high (84.1%) and `slip` is **-2.20 of +179.72, 1.2%**.
+  `grind` at -16.82 is the term doing the work. Narrowing `slip` is not urgent on this evidence.
+* *The policy did not beat the script's 13% forearm-still rotation. It scored **0.03%**.* It is
+  not near 13% either, so the diagnosis M8 pre-registered -- "the reward permits the motion but
+  something else prevents it, look at actuator authority at the index MCP" -- is not what
+  happened. The reward permits the forearm route and the policy took **all** of it: the finger
+  share goes 5.4% -> 0.0% by 39M and stays there for the last sixteen evals (0.00, 0.00, 0.01,
+  0.01, 0.03%).
+
+**What the policy actually does**, and it is worth stating plainly because the return cannot say
+it: clamp a lateral pinch (opposition +0.92, gaps under 0.3 mm), pronate the forearm to the stop,
+let the index pad walk around the cap, repeat. Per episode the forearm travels ~5,930 deg inside
+a 45-deg joint range -- about 93 strokes, ~1.5 Hz -- and the cap turns 13,220 deg at 220 deg/s.
+The fingers are not passengers in the joint-travel sense (74.7% of travel is fingers, and the
+index regrips **89.88 times per episode**), but the **thumb regrips 0.00 times**, and no rotation
+at all is carried while the forearm is still.
+
+**Called as a pass.** Reviewed on video (`artifacts/m8_s1_ep00.mp4`, 60 s, three cameras, sites
+and contact forces; `artifacts/m8_s1_cycle_slow.mp4`, a 4 s window at 5x slow, re-simulated on
+CPU at substep resolution because the 20 Hz saves cannot be slowed smoothly -- it lands within
+0.14% of the recorded warp trajectory). The judgement: the index regripping ~90 times an episode
+*is* the gait, and pronation is the hand using a joint M7 deliberately gave it, so this satisfies
+"real finger gaiting with no exploit". **PRD M5 is met on seed 1.**
+
+What that does not settle: this is **one seed**, where the project's convention is three, and
+the route being paid equally whether fingers or forearm produce it remains true by design -- so a
+later reward change has no finger-share evidence to regress against. `finger_carried_rotation`
+is the metric that would catch it either way, and it is now also the metric that says this
+policy's hand contributes none of the turning.
+
 ### Still to do
 
 1. **Retrain three seeds.** Nothing from M6 or M7 transfers: the reward, the pose and the mount

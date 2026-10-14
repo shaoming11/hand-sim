@@ -92,7 +92,27 @@ it carries **26%**. 45 is the smallest range that keeps the trajectory clean -- 
 finger share is bought with slip rather than finger work. This did what an explicitly
 finger-sweeping gait could not: that gait buys 4 points of finger share for 11 points of slip,
 because gripping and sweeping draw on the same actuators. Parity is **0.0%** on both criteria.
-Still nothing trained. Details in [`NOTES.md`](NOTES.md), M8.
+Details in [`NOTES.md`](NOTES.md), M8.
+
+**M8 trained, and the PRD's M5 is met.** One seed to 150M steps on an H200, 2.2 h at 18,771
+steps/s all-in. Over 1024 deterministic episodes the policy succeeds **100.00% +- 0.00** against
+the PRD's 80% bar, turning the cap **+13,222 deg** (36.7 turns) at net/gross **+0.991**, with
+opposition +0.919 and *opposed on 100% of steps*, both gaps under 0.3 mm, no drops, and the
+cleanest contact the project has trained: **-0.170 mm** of penetration against M1's -0.566. The
+policy's own trajectory replays CPU-vs-warp at **0.0%** and is timestep-converged at 0.0%, so
+none of it is solver error -- but it wants `njmax` 110 per world where the scripted gaits wanted
+84, which is the standing lesson in the other direction: *a trained policy loads the scene harder
+than any script used to size the buffers.*
+
+**The route is the forearm, and that is a judgement call rather than a measurement.** The policy
+clamps a lateral pinch, pronates to the stop, walks the index pad around the cap and repeats --
+~93 strokes an episode at ~1.5 Hz. 74.7% of joint travel is fingers and the index regrips
+**89.9 times per episode**, but the thumb regrips **0.00** times and `finger_carried_rotation`,
+the metric M8 added for exactly this question, reads **0.0%**: no rotation at all is carried
+while the forearm is still. Reviewed on video and called a pass -- the index regripping ~90 times
+an episode is the gait, and pronation is the hand using a joint M7 deliberately gave it. The
+reward pays fingers and forearm alike by design, so this is the route it permits, not the route
+it asks for. One seed, where the convention here is three.
 
 ## Setup (Mac, CPU)
 

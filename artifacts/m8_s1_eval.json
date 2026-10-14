@@ -1,0 +1,77 @@
+{
+  "episodes": 1024,
+  "success_rate": 1.0,
+  "success_stderr": 0.0,
+  "success_threshold_deg": 720.0,
+  "net_rotation_deg": {
+    "mean": 13222.7587890625,
+    "median": 13219.580078125,
+    "p10": 13137.1513671875,
+    "p90": 13309.9619140625
+  },
+  "gross_rotation_deg_mean": 13342.7451171875,
+  "net_over_gross": 0.9910073280334473,
+  "mean_angvel_deg_s": 220.2129364013672,
+  "drop_rate": 0.0,
+  "mean_episode_steps": 1200.0,
+  "regrips_per_episode": {
+    "rh_th_tip": 0.0,
+    "rh_ff_tip": 89.884765625
+  },
+  "episodes_with_no_regrip": 0.0,
+  "grasp": {
+    "thumb_gap_mm": {
+      "median": 0.08142832666635513,
+      "p90": 0.5463287234306335
+    },
+    "index_gap_mm": {
+      "median": 0.27577904984354973,
+      "p90": 1.31752819288522
+    },
+    "opposition": {
+      "median": 0.9192858934402466,
+      "frac_opposed": 1.0
+    },
+    "frac_steps_both_within_contact_distance": 1.0,
+    "contact_distance_mm": 20.0,
+    "grasp_term_median": 0.9266388416290283,
+    "opposition_target_deg": 150.0
+  },
+  "gait_tip_count": 2,
+  "simultaneous_contacts": {
+    "median": 2.0,
+    "mean": 1.3224593098958333,
+    "frac_steps_multi_contact": 0.54764892578125,
+    "frac_steps_no_contact": 0.22518961588541667
+  },
+  "wrist_share_of_travel": 0.25299766659736633,
+  "wrist_joint_count": 3,
+  "hand_joint_count": 25,
+  "action_chatter": 0.29682523012161255,
+  "overflow_flags": [
+    "ITERATIONS"
+  ],
+  "gap_thresholds": {
+    "contact_gap_m": 0.01,
+    "release_gap_m": 0.02,
+    "median_gap_m": 0.004780760034918785
+  },
+  "checkpoint": "/root/hand-sim/logs/capturn-nominal-s1/checkpoints/from000000000000/000150732800",
+  "step": 150732800,
+  "dr_scale": 0.0,
+  "deterministic": true,
+  "saved": [
+    "m8_s1_ep00.npz",
+    "m8_s1_ep01.npz",
+    "m8_s1_ep02.npz",
+    "m8_s1_ep03.npz"
+  ],
+  "saved_net_rotation_deg": [
+    13163.4873046875,
+    13168.8564453125,
+    13302.4287109375,
+    13293.93359375
+  ],
+  "worst_penetration_mm": -0.16991808222647012,
+  "reset_penetration_mm": -0.04357766470941822
+}
