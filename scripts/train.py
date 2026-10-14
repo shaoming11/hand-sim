@@ -375,7 +375,11 @@ def main(argv: list[str] | None = None) -> None:
                 "phase without the model-level randomisation would quietly be a different "
                 "experiment from the one the PRD asks for."
             )
-        randomization_fn = randomize.domain_randomize
+        # The scale has to be bound here. Brax binds only the rng
+        # (`functools.partial(randomization_fn, rng=...)`), so an unbound `scale` would default
+        # to 1.0 and `--dr-scale 0.25` would quietly randomize the *model* at full range while
+        # narrowing only the env-level noise -- two different experiments under one flag.
+        randomization_fn = functools.partial(randomize.domain_randomize, scale=args.dr_scale)
         if restore_path is None:
             print("note: --phase dr without a checkpoint is the PRD's from-scratch DR baseline")
     else:
