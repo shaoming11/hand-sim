@@ -72,6 +72,10 @@ def build_env() -> CapTurn:
     return CapTurn(cfg)
 
 
+class StaleRecording(Exception):
+    """A recording whose action width predates the current model (M7's forearm roll)."""
+
+
 def load(path: pathlib.Path, env: CapTurn) -> dict:
     """A recording as `(qpos, qvel, ctrl, action)`, all of length T, plus notes on the recovery."""
     z = np.load(path)
@@ -79,6 +83,16 @@ def load(path: pathlib.Path, env: CapTurn) -> dict:
     dt = float(z["ctrl_dt"]) if "ctrl_dt" in z.files else env.dt
     scale = float(env._config.action_scale)
     lo, hi = np.asarray(env._lowers), np.asarray(env._uppers)
+
+    # M8: the hand gained a 21st actuator when M7 added the forearm roll, so every recording
+    # made before that is 20 wide and cannot be replayed against this model. Say so by name --
+    # the broadcast error this used to raise named neither the file nor the reason.
+    width = len(env._init_ctrl)
+    for key in ("ctrl", "action"):
+        if key in z.files and np.asarray(z[key]).shape[-1] != width:
+            raise StaleRecording(
+                f"{path.name}: {key} is {np.asarray(z[key]).shape[-1]} wide against this "
+                f"model's {width} actuators -- recorded before M7 added the forearm roll")
 
     saturated = None
     if "ctrl" in z.files:
@@ -256,13 +270,19 @@ def main(argv: list[str] | None = None) -> None:
         wanted = [(ROOT / "artifacts" / n, label) for n, label in KNOWN]
 
     env = build_env()
-    results = []
+    results, skipped = [], []
     for path, label in wanted:
         if not path.exists():
             print(f"\n{path.name}  --  MISSING (regenerate with scripts/squeeze_twist.py "
                   f"or scripts/eval.py)")
             continue
-        res = score(env, load(path, env))
+        try:
+            data = load(path, env)
+        except StaleRecording as exc:
+            print(f"\n{path.name}  --  SKIPPED: {exc}")
+            skipped.append(path.name)
+            continue
+        res = score(env, data)
         report(path.name, label or "", res, args.per_step)
         results.append((path.name, res))
 
@@ -272,6 +292,9 @@ def main(argv: list[str] | None = None) -> None:
         for name, res in sorted(results, key=lambda kv: -kv[1]["per_second"]):
             print(f"  {res['per_second']:+9.4f}/s  {res['total']:+10.3f} over {res['seconds']:5.1f} s"
                   f"   strokes {res['strokes']:3.0f}   {name}")
+    if skipped:
+        print(f"\nskipped {len(skipped)} recording(s) older than M7's forearm roll: "
+              f"{', '.join(skipped)}")
 
 
 if __name__ == "__main__":
