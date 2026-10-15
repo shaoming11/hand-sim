@@ -1,0 +1,71 @@
+{
+  "episodes": 1024,
+  "success_rate": 1.0,
+  "success_stderr": 0.0,
+  "success_threshold_deg": 720.0,
+  "net_rotation_deg": {
+    "mean": 11362.8056640625,
+    "median": 11363.1513671875,
+    "p10": 11325.5087890625,
+    "p90": 11401.720703125
+  },
+  "gross_rotation_deg_mean": 11373.7548828125,
+  "net_over_gross": 0.9990373253822327,
+  "mean_angvel_deg_s": 188.4557342529297,
+  "drop_rate": 0.0,
+  "mean_episode_steps": 1200.0,
+  "regrips_per_episode": {
+    "rh_th_tip": 0.0,
+    "rh_ff_tip": 79.0
+  },
+  "episodes_with_no_regrip": 0.0,
+  "grasp": {
+    "thumb_gap_mm": {
+      "median": -0.1265164464712143,
+      "p90": 0.9693728643469512
+    },
+    "index_gap_mm": {
+      "median": 0.38368115201592445,
+      "p90": 2.1939941216260195
+    },
+    "opposition": {
+      "median": 0.8903698325157166,
+      "frac_opposed": 1.0
+    },
+    "frac_steps_both_within_contact_distance": 1.0,
+    "contact_distance_mm": 20.0,
+    "grasp_term_median": 0.9418865442276001,
+    "opposition_target_deg": 150.0
+  },
+  "gait_tip_count": 2,
+  "simultaneous_contacts": {
+    "median": 1.0,
+    "mean": 1.3805135091145833,
+    "frac_steps_multi_contact": 0.4695231119791667,
+    "frac_steps_no_contact": 0.08900960286458333
+  },
+  "wrist_share_of_travel": 0.23319843411445618,
+  "wrist_joint_count": 3,
+  "hand_joint_count": 25,
+  "action_chatter": 0.3067706823348999,
+  "overflow_flags": [],
+  "gap_thresholds": {
+    "contact_gap_m": 0.01,
+    "release_gap_m": 0.02,
+    "median_gap_m": 0.005662471987307072
+  },
+  "checkpoint": "/root/hand-sim/logs/capturn-nominal-s2/checkpoints/from000000000000/000150732800",
+  "step": 150732800,
+  "dr_scale": 0.0,
+  "deterministic": true,
+  "saved": [
+    "m8_s2_ep00.npz",
+    "m8_s2_ep01.npz"
+  ],
+  "saved_net_rotation_deg": [
+    11369.431640625,
+    11329.228515625
+  ],
+  "worst_penetration_mm": -0.2660058884170946,
+  "reset_penetration_mm": 0.0
+}

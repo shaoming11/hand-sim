@@ -1,0 +1,350 @@
+{
+  "checkpoint": "/root/hand-sim/logs/capturn-nominal-s1/checkpoints/from000000000000/000150732800",
+  "episodes": 1024,
+  "results": {
+    "tip_friction": {
+      "description": "fingertip + cap sliding friction, PRD *U(0.6, 1.4)",
+      "points": [
+        {
+          "value": "x0.6",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 8800.255859375,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x0.8",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 12262.0361328125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.1865234375,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.2",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13570.9892578125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.4",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13510.357421875,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "cap_frictionloss": {
+      "description": "cap thread friction, PRD U(0.02, 0.15) N*m (nominal 0.05)",
+      "points": [
+        {
+          "value": "0.02",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 15525.85546875,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "0.035",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 14308.8974609375,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "0.05",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.3525390625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "0.08",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 11003.1728515625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "0.11",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 8493.091796875,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "0.15",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 4609.2568359375,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "cap_damping": {
+      "description": "cap hinge damping, PRD *U(0.5, 2.0)",
+      "points": [
+        {
+          "value": "x0.5",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 14256.0634765625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.3828125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x2",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 11448.49609375,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "actuator_gain": {
+      "description": "actuator stiffness kp, PRD *U(0.8, 1.2)",
+      "points": [
+        {
+          "value": "x0.8",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 11185.3935546875,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x0.9",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 12137.9111328125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.8193359375,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 14298.8857421875,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.2",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 14346.2646484375,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "hand_damping": {
+      "description": "hand joint damping, PRD *U(0.7, 1.3)",
+      "points": [
+        {
+          "value": "x0.7",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 14332.4658203125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13221.767578125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.3",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 11328.6806640625,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "hand_frictionloss": {
+      "description": "hand joint friction, PRD *U(0.5, 2.0)",
+      "points": [
+        {
+          "value": "x0.5",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13601.349609375,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13221.6962890625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.5",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 12787.962890625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x2",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 12541.658203125,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "hand_armature": {
+      "description": "hand armature, PRD *U(1.0, 1.2)",
+      "points": [
+        {
+          "value": "x1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.3154296875,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.1",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.34765625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "x1.2",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.880859375,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "qpos0_offset": {
+      "description": "joint zero offset, PRD +-0.03 rad (applied to every hand joint at once)",
+      "points": [
+        {
+          "value": "-0.03",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 6086.02880859375,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "-0.015",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 10668.30078125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "+0",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13221.6796875,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "+0.015",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13229.5595703125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "+0.03",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 12241.7236328125,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "bottle_x": {
+      "description": "bottle placement along x, PRD +-1.5 cm",
+      "points": [
+        {
+          "value": "-1.5 cm",
+          "success_rate": 0.0126953125,
+          "success_stderr": 0.0034986243865512676,
+          "net_rotation_deg": 98.67990112304688,
+          "drop_rate": 0.0048828125
+        },
+        {
+          "value": "-0.75 cm",
+          "success_rate": 0.35546875,
+          "success_stderr": 0.014957972299934993,
+          "net_rotation_deg": 655.185546875,
+          "drop_rate": 0.2529296875
+        },
+        {
+          "value": "+0 cm",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13222.126953125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "+0.75 cm",
+          "success_rate": 0.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 44.67283248901367,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "+1.5 cm",
+          "success_rate": 0.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 2.3389205932617188,
+          "drop_rate": 0.0
+        }
+      ]
+    },
+    "bottle_tilt": {
+      "description": "bottle tilt, PRD +-5 deg",
+      "points": [
+        {
+          "value": "0 deg",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 13221.9765625,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "2.5 deg",
+          "success_rate": 0.755859375,
+          "success_stderr": 0.013424266020460675,
+          "net_rotation_deg": 2083.302001953125,
+          "drop_rate": 0.0
+        },
+        {
+          "value": "5 deg",
+          "success_rate": 1.0,
+          "success_stderr": 0.0,
+          "net_rotation_deg": 6447.53515625,
+          "drop_rate": 0.0
+        }
+      ]
+    }
+  }
+}

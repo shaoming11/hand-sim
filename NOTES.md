@@ -2974,6 +2974,70 @@ policy's hand contributes none of the turning.
 
 ---
 
+## PRD M6 — the sensitivity sweep
+
+`scripts/sweep.py` against seed 1's final checkpoint, **1024 episodes per point, 42 points**,
+one parameter moved at a time across the PRD's DR range with every other held nominal. Run
+2026-10-14 23:24 to 00:41 on the H200. Raw numbers in `artifacts/sweep_m8.json`.
+
+The PRD's reason for running this before any DR training is "this shows which ranges matter".
+It does, and the answer is lopsided: **eight of the nine parameter groups do not matter at all,
+and the ninth is fatal.**
+
+### Everything the hand touches is robust
+
+Success stays at **100.0%** across the entire PRD range for tip and cap friction, cap thread
+friction, cap damping, actuator stiffness, hand damping, hand joint friction, hand armature and
+the ±0.03 rad joint-zero offsets. What moves is the *rate*, not the outcome:
+
+| parameter | range swept | success | net rotation across the range |
+|---|---|---|---|
+| `tip_friction` | x0.6 / x0.8 / x1 / x1.2 / x1.4 | 100% | 8800 / 12262 / 13222 / 13571 / 13510 deg |
+| `cap_frictionloss` | 0.02 / 0.035 / 0.05 / 0.08 / 0.11 / 0.15 | 100% | 15526 / 14309 / 13222 / 11003 / 8493 / 4609 deg |
+| `cap_damping` | x0.5 / x1 / x2 | 100% | 14256 / 13222 / 11448 deg |
+| `actuator_gain` | x0.8 / x0.9 / x1 / x1.1 / x1.2 | 100% | 11185 / 12138 / 13223 / 14299 / 14346 deg |
+| `hand_damping` | x0.7 / x1 / x1.3 | 100% | 14332 / 13222 / 11329 deg |
+| `hand_frictionloss` | x0.5 / x1 / x1.5 / x2 | 100% | 13601 / 13222 / 12788 / 12542 deg |
+| `hand_armature` | x1 / x1.1 / x1.2 | 100% | 13222 / 13222 / 13223 deg |
+| `qpos0_offset` | -0.03 / -0.015 / +0 / +0.015 / +0.03 | 100% | 6086 / 10668 / 13222 / 13230 / 12242 deg |
+
+The two that bite hardest on rate are cap thread friction -- 15,526 deg at 0.02 N*m against
+**4,609 at 0.15**, a 3.4x span -- and tip friction, 8,800 deg at x0.6 against 13,510 at x1.4.
+Both are the physics behaving as it should: a stiffer thread and a slipperier pad both mean less
+cap per stroke. Neither threatens the task. `hand_armature` is inert to three significant
+figures across its whole range, which makes it the one PRD parameter that could be dropped from
+DR without losing anything.
+
+### Bottle placement is the whole risk
+
+| `bottle_x` | -1.5 cm | -0.75 cm | 0 | +0.75 cm | +1.5 cm |
+|---|---|---|---|---|---|
+| success | **1.3%** | **35.5%** | 100.0% | **0.0%** | **0.0%** |
+| net deg | 99 | 655 | 13,222 | 45 | 2 |
+
+Half a centimetre in either direction and the policy is at or near zero. For scale, the PRD's DR
+range for this parameter is **±1.5 cm**, where the policy scores 1.3% and 0.0%.
+
+**There is a structural reason, and it is not the policy's fault.** The hand's mount is fixed and
+`rh_WRJ0` is a *roll*: the wrist flexes and deviates but the hand cannot translate. When the
+bottle moves 1.5 cm the hand cannot follow it, and the pregrasp keyframe it starts from was
+numerically fitted (M8) to the bottle being exactly where it now is not. So this is not only
+"the policy overfitted to one geometry" -- it is also "the morphology has no degree of freedom
+that answers a lateral shift, and the start pose is fitted to the nominal one". Whether a
+DR-trained policy can reach across that gap with fingers alone is exactly what the M7 run
+measures, and it was decided to run the PRD's full range rather than narrow it, so that the
+answer is a measurement rather than an artifact of a range chosen to be winnable.
+
+### One result with no explanation yet
+
+`bottle_tilt` is **non-monotone**: 0 deg gives 100.0% at 13,222, **2.5 deg gives 75.6% at
+2,083**, and 5 deg returns to 100.0% but at 6,448 -- half the rotation. A middle value worse than
+both ends is not what a smooth degradation looks like. It is recorded here and deliberately not
+explained; the plausible candidates (the tilt axis interacting with where the pinch sits, or the
+grasp-loss termination firing at one geometry and not another) are guesses until someone looks.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
