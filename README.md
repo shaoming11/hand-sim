@@ -16,14 +16,6 @@ python3 scripts/eval.py logs/capturn-nominal-s1/checkpoints/.../000150732800 --s
 python3 scripts/render.py artifacts/m8_s1_ep00.npz --camera all --sites --contacts
 ```
 
-Status: **M0** (scene), **M1** (open-loop feasibility), **M2** (MJX parity), **M3** (benchmark)
-and **M4** (the env) done. **`num_envs = 8192`**, `sim_dt = 0.00125` -- 3.52M sim-steps/s,
-**4,405x realtime** on an RTX PRO 6000 Blackwell (88,106 control-steps/s) once the fingertip
-collision hulls are capped at 16 vertices. That is **2.72x** the same config on an H200
-(32,358), GPU and geometry together. The H200 itself was worth only +2.9% over the H100 --
-this workload is latency-bound, not bandwidth-bound, so the hulls are doing most of the work
-(NOTES.md, M3 and M5).
-
 **M5 (nominal training): criterion 1 passes, criterion 2 does not.** The scene and reward
 changes did most of what they were meant to -- parity improves 2.2% -> **0.2%**, warp reports
 **no overflow at all**, the pregrasp parking reward drops +0.978 -> **+0.038**, rotation falls
