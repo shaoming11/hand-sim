@@ -18,6 +18,51 @@
           <joint range="-0.698132 0.488692"/>
           <position kp="8" ctrlrange="-0.698132 0.488692" forcerange="-5 5"/>
         </default>
+        <!-- M7: forearm pronation/supination. Menagerie's hand stops at WRJ1/WRJ2, which flex
+             and deviate; the roll lives in the forearm, which this model welds to the world. A
+             person unscrews a cap by *rolling the forearm* while the fingers hold, so without
+             this the twist has to come from the fingers and the task is in-hand rotation
+             wearing a bottle-cap costume. NOTES.md, M6 -- "point 1 is not available in
+             this scene".
+             Axis is the forearm's own long axis: `rh_wrist` sits at (0.01, 0, 0.213) in this
+             frame and the inertia tensor's small principal moment is the third, so local z runs
+             up the arm.
+             Range is *asymmetric*, and measured rather than assumed. Holding the pinch closed
+             and settling at each roll angle, the pose is clean from -90 deg up to 0 and the hand
+             starts catching the bottle from +15 deg on (1-2 bottle contacts, rising to -0.144 mm
+             of penetration by +60). A symmetric +-80 deg was wrong both ways: 80 deg of it was
+             unreachable and it clipped 10 deg of good travel. The clean envelope is -90 to +10.
+             M8 narrows the *usable* end of it to -45, and that is the single number deciding
+             how much of this task the forearm is allowed to do.
+             At -90 one stroke turns the cap about 92 deg, so pronation alone finishes 4*pi in
+             under 8 strokes and the fingers are very nearly spectators -- measured on the
+             scripted gait, 9% of the rotation the pads carried. That is the behaviour the
+             reward cannot and should not forbid (it states what counts as turning the cap, not
+             which joints may do it -- see NOTES.md M7 for what happens when it tries), so the
+             morphology has to be what asks for the fingers.
+             Swept, with everything else fixed:
+                 range   cap/cycle   carried   finger share
+                 -90        92.3       84%          9%
+                 -60        79.5       78%         13%
+                 -45        68.7       79%         26%
+                 -30        61.1       71%         33%
+                 -20        54.8       67%         38%
+             -45 is the smallest range that still keeps the trajectory clean. `carried` -- the
+             fraction of cap rotation the pads took without slipping -- sits on a plateau down
+             to -45 and then falls away, because a shorter stroke means more release-and-regrip
+             cycles per degree of cap, and the regrip is where slip happens. Below -45 the
+             finger share is bought with slip rather than with finger work, which is not the
+             trade wanted. The scripted gait cannot use the fingers well (NOTES.md M8), so 26%
+             is a floor on what a policy should manage here, not a target.
+             4*pi now needs about 11 strokes rather than 8, still far inside the 54 the episode
+             allows, so the task stays comfortably solvable.
+             kp 20 / 10 N*m is above the wrist joints because this one swings the whole hand;
+             human pronation torque is 5-10 N*m. Armature 0.001 against the forearm's own
+             0.00744 kg*m^2 about z is a plausible geared rotor and keeps the hinge stiff. -->
+        <default class="wrist_roll">
+          <joint axis="0 0 1" range="-0.785398 0.174533" armature="0.001"/>
+          <position kp="20" ctrlrange="-0.785398 0.174533" forcerange="-10 10"/>
+        </default>
       </default>
 
       <default class="thumb">
@@ -115,8 +160,11 @@
   <worldbody>
     <!-- MOUNT: pos/quat below are fitted by scripts/fit_pregrasp.py. Do not hand-edit. -->
     <body name="rh_forearm" childclass="right_hand"
-      pos="0.158327 0.0255187 0.552298" quat="-0.0392589 0.941271 0.238297 -0.235971">
+      pos="0.157983 -0.00349073 0.554306" quat="-0.0611664 0.922645 0.312945 -0.216912">
       <inertial mass="3" pos="0 0 0.09" diaginertia="0.0138 0.0138 0.00744"/>
+      <!-- M7: the only joint between the forearm and the world. The mount pos/quat above still
+           fix where the arm is; this lets it roll about its own axis, and nothing else. -->
+      <joint class="wrist_roll" name="rh_WRJ0"/>
       <geom class="plastic_visual" mesh="forearm_0" material="gray"/>
       <geom class="plastic_visual" mesh="forearm_1"/>
       <geom class="plastic_collision" type="mesh" mesh="forearm_collision"/>
@@ -319,6 +367,7 @@
   </tendon>
 
   <actuator>
+    <position name="rh_A_WRJ0" joint="rh_WRJ0" class="wrist_roll"/>
     <position name="rh_A_WRJ2" joint="rh_WRJ2" class="wrist_y"/>
     <position name="rh_A_WRJ1" joint="rh_WRJ1" class="wrist_x"/>
     <position name="rh_A_THJ5" joint="rh_THJ5" class="thbase"/>

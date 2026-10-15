@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from scripts import squeeze_twist  # noqa: E402
 from scripts.view_scene import GAIT_TIPS, cap_surface_distance, load  # noqa: E402
 
 REACH_TOLERANCE = 0.010  # PRD M0: gaiting fingertips within about 1 cm of the cap rim
@@ -27,11 +28,33 @@ def scene():
 
 def test_scene_loads_with_expected_shape(scene):
     model, _ = scene
-    assert model.nu == 20, "20 position actuators"
-    assert model.nq == 25, "24 hand joints + 1 cap hinge"
-    assert model.njnt == 25
+    # M7: 20 -> 21 and 25 -> 26. `rh_WRJ0` is the forearm roll -- pronation, the joint a person
+    # actually unscrews a cap with, and the one Menagerie's hand does not have. NOTES.md, M6.
+    assert model.nu == 21, "20 position actuators + the forearm roll"
+    assert model.nq == 26, "25 hand joints + 1 cap hinge"
+    assert model.njnt == 26
     assert model.body("rh_forearm").parentid[0] == 0, "forearm hangs off the world"
-    assert model.body("rh_forearm").jntnum[0] == 0, "forearm has no joint, so the base is fixed"
+    assert model.body("rh_forearm").jntnum[0] == 1, "the forearm's one joint is the roll"
+    roll = model.joint("rh_WRJ0")
+    assert roll.type[0] == mujoco.mjtJoint.mjJNT_HINGE
+    assert abs(roll.axis[2]) == 1.0 and roll.axis[0] == 0.0 and roll.axis[1] == 0.0, (
+        "pronation is about the forearm's own long axis, which is local z here"
+    )
+    # The range is load-bearing, not cosmetic, and M8 made it more so. It is the only thing that
+    # decides how much of this task the forearm may do: the reward states what counts as turning
+    # the cap, deliberately not which joints may do it, so the share the fingers carry has to
+    # come from the morphology. At the M7 range of -90 deg the scripted gait carried 9% of the
+    # rotation on its fingers; at -45 it carries 26%. NOTES.md, M8.
+    lo, hi = float(roll.range[0]), float(roll.range[1])
+    assert hi - lo < 2 * 3.15, "a full turn must not fit in one roll"
+    assert lo == pytest.approx(-0.785398, abs=1e-5), (
+        "M8: the usable end of the roll is -45 deg. Widening it hands the task back to the "
+        f"forearm -- read {lo:.4f} rad"
+    )
+    # And the scripted stroke has to be the range, or the reference gaits stop exercising it.
+    assert squeeze_twist.ROLL_TO == pytest.approx(lo, abs=1e-5), (
+        f"scripts/squeeze_twist.ROLL_TO is {squeeze_twist.ROLL_TO}, the joint stops at {lo}"
+    )
     assert model.body("bottle").jntnum[0] == 0, "bottle is fixed in place"
     assert model.joint("cap_hinge").type[0] == mujoco.mjtJoint.mjJNT_HINGE
 
@@ -42,7 +65,7 @@ def test_cap_is_the_only_moving_object(scene):
     hand_dofs = [
         model.jnt_dofadr[j] for j in range(model.njnt) if model.joint(j).name.startswith("rh_")
     ]
-    assert len(hand_dofs) == 24
+    assert len(hand_dofs) == 25  # M7: + rh_WRJ0
     assert sorted(hand_dofs + cap_dofs) == list(range(model.nv))
 
 

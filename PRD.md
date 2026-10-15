@@ -15,7 +15,7 @@ Do not revisit these without asking.
 
 | Topic | Decision |
 |---|---|
-| Hand | Shadow Hand (right) from `mujoco_menagerie`. Base fixed in the air. Wrist and fingers move (20 position actuators, 24 joints). |
+| Hand | Shadow Hand (right) from `mujoco_menagerie`. Base fixed in the air except for forearm roll. Wrist and fingers move (21 position actuators, 25 joints). |
 | Bottle | Fixed in place, as if a person is holding it. No free joint, no table. |
 | Cap | Only moving object. One hinge about the bottle axis. No thread model. |
 | Cap state | "Already cracked open": running friction only, not the sealed breakaway torque. |
@@ -157,6 +157,81 @@ No cap angle in the actor. The cap is rotationally symmetric, so the policy does
 | torque | `-sum(actuator_force^2)` | 1e-3 |
 | joint velocity | `-sum(qvel_hand^2)` | 1e-4 |
 | success | one-time bonus when cumulative rotation passes `4*pi` | 10.0 |
+
+**M6 revision: `rotate` is gone, and rotation is paid by the grasp rather than alongside it.**
+The table above was measured against the trajectories in `artifacts/` and it ranks the
+hand-authored reference gait **last of five**, behind every policy M5 produced including one
+that failed the task outright; the flick exploit ranks first, by 2.3x. Two causes: the terms
+were *added*, so turning the cap badly and holding it well were alternatives, and `rotate`'s
+per-step rate clip paid a bursty gait only 50.1% of its own rotation while paying a continuous
+grinder all of it. The term is now
+
+    twist = pinch * clip(d_theta, 0, stroke_budget_remaining) / ctrl_dt
+
+with `stroke_budget` (60 deg) refilling only when a new grip begins, so two full turns need at
+least twelve strokes and "twist it several times" follows from the budget rather than from a
+term asking for cycles. `slip`, `backdrive` and `bottle` are added, the opposition factor
+saturates at 150 deg rather than 180 (which is where the re-fitted pose puts the pinch, and
+where the bottle neck is not), and `success` goes to 100.0. There is no rate clip and no
+angular-velocity cost: both punish the reference gait harder than any measured exploit.
+`scripts/score_reward.py` scores a saved trajectory with the live reward and
+`tests/test_reward_ranking.py` pins the ordering, so this is checkable before a GPU run rather
+than after one. See NOTES.md, M6.
+
+**M7 revision: the forearm rolls.** M6 shaped the grasp, the stroke and the cadence of the human
+motion but not its actuation — a person unscrews a cap with forearm pronation, and this hand had
+none, so the twist had to come from the fingers. The rendered M6 rollout makes the consequence
+plain: a correct thumb-index lateral pinch releasing and regripping 132 times an episode, at
+273 deg/s, which is a motion no hand makes. So `rh_forearm` now carries one joint to the world,
+`rh_WRJ0`, a hinge about its own long axis, range -90 deg to +10 (measured: the hand fouls the
+bottle from +15 on). This revises "Base fixed in the air" above.
+
+An 80 deg roll turns the cap +74 deg net of the grip-ramp baseline — a cap/roll ratio of 0.93,
+i.e. a non-slipping grip — and one 90 deg stroke turns it +98.5 deg, so two full turns need
+about ten strokes instead of the finger gait's ~21. The roll limit therefore enforces the
+release-and-regrip cycle *geometrically*, which means `stroke_budget` and the proposed cadence
+refractory both come out: they were inventions to force a cycle the hardware now requires.
+
+Costs, stated plainly: the action is 21-dim and the observation layout changes, so no M6
+checkpoint loads and all three seeds need retraining; the pregrasp wants re-fitting with roll
+free; buffers and parity want re-probing. And the task is easier — if hard in-hand finger
+gaiting was part of the interest, that is the part this removes. See NOTES.md, M7.
+
+**M8 revision: the fingers are not passive, and the pinch belongs on the cap.** M7 paid cap
+rotation only to the extent the *forearm roll* accounted for it, and charged the rest. That was
+an overcorrection. Measured at the contact points of the re-fitted pose, `rh_FFJ3` — the index
+MCP, the joint that straightens the finger — sweeps the index pad 106.7 deg around the cap axis
+per radian, against `rh_WRJ0`'s 38.5: the index finger is 2.8x the lever the forearm is, and M7
+charged all of it at -0.5. The reward now pays rotation the **two pads carried** without
+slipping, which is the rolling constraint applied at the contacts and admits any combination of
+fingers and forearm, while still refusing slip (a cap turning under a motionless hand) and shear
+(the two pads sweeping opposite ways). `freewheel` is renamed `grind` with its meaning.
+
+The pregrasp is also re-fitted, because it was gripping the cap's bottom lip: the index pad sat
+at cap-frame z = -5.5 mm on a cap spanning ±8 mm, 0.63 mm off the surface and so already loaded.
+Two causes, both fixed — the fitter constrained fingertip *sites* while the reward measures the
+nearest point of the collision *geoms* (on that pose the two disagreed by 5 mm), and the settled
+stage froze the hand's mount, which is the one variable that decides how far it sags. Both pads
+now sit near the cap's mid-band with ~3 mm to squeeze through, and the gait's bottle contact goes
+from 91 of 220 steps to 0 of 264.
+
+**And `rh_WRJ0`'s range narrows from 90 deg to 45.** This revises the M7 range above, and it is
+the change that actually makes the fingers work. The reward is deliberately indifferent to *which
+joints* turn the cap — it says what counts as turning it, and M7 is the cautionary tale for
+saying more — so the share the fingers carry has to come from the morphology. At 90 deg one
+stroke turns the cap 92 deg, pronation finishes 4*pi in under 8 strokes, and the scripted gait
+carries 9% of its rotation on the fingers. At 45 deg it carries **26%**. Swept, 45 is the
+smallest range that keeps the trajectory clean: the carried fraction sits on a plateau down to
+45 and falls away below it, because a shorter stroke means more regrips per degree and the
+regrip is where slip happens. 4*pi now needs about 11 strokes against the 54 an episode allows.
+
+Costs, stated plainly: the reward, the pose, the mount and the roll range all changed, so all
+three seeds need retraining again. And one thing M8 does *not* deliver — no *scripted* gait
+demonstrates a finger-driven stroke. Explicitly sweeping the pads tangentially buys 4 points of
+finger share for 11 points of slip, because a fixed envelope has to split one actuator budget
+between gripping and sweeping on a pre-set schedule, and grip is what stops the roll slipping.
+The motion needs both at once, which means closed-loop grip modulation. That is a question for
+training rather than a question about the reward. See NOTES.md, M8.
 
 **Termination.** NaN in qpos or qvel. All gaiting fingertips more than 10 cm from the cap, or the grasp lost for `grasp_grace_steps` consecutive steps. Otherwise fixed length.
 

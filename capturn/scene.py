@@ -36,6 +36,15 @@ IDLE_TIP_SENSORS = ("mf_tip_position", "rf_tip_position", "lf_tip_position")
 ALL_TIP_SENSORS = GAIT_TIP_SENSORS + IDLE_TIP_SENSORS
 
 CAP_JOINT = "cap_hinge"
+# M7: the forearm roll -- pronation. Declared on `rh_forearm`, the root body, so it leads both
+# qpos and ctrl; everything here resolves it by name anyway.
+ROLL_JOINT = "rh_WRJ0"
+
+# M6: the geoms a pinch must not reach. The re-fitted pregrasp opposes the two fingers at 150 deg
+# rather than 180 precisely because the far hemisphere is where the neck is, and the reward has to
+# agree with the pose: `reward_config.scales.bottle` costs a pinch surface for entering the
+# bottle's margin. Both are z-aligned cylinders, read from the compiled model.
+BOTTLE_GEOMS = ("bottle_body", "bottle_neck")
 
 # M5: what a bottle-cap grasp actually is. A person opposes the thumb pad against the *side* of
 # the index finger -- a lateral pinch -- not a tripod of fingertips. The first trained policy got
@@ -73,11 +82,16 @@ def grasp_geometry(points, geom_radius, origin, mat, cap_radius: float, cap_half
     """Closest approach of a group of geoms to the cap, and the direction it approaches from.
 
     `points` is (n_geoms, samples, 3) in world coordinates, `geom_radius` is (n_geoms,).
-    Returns `(gap, unit_radial)`: the smallest surface-to-surface gap over every sample, and the
-    horizontal unit vector in the cap frame pointing from the cap axis towards that closest
-    sample. The unit vector is what makes opposition measurable -- two grips are opposed when
-    their vectors point opposite ways, which is a dot product rather than an angle, so there is
-    no wrap-around to handle.
+    Returns `(gap, unit_radial, contact, which)`: the smallest surface-to-surface gap over every
+    sample; the horizontal unit vector in the cap frame pointing from the cap axis towards that
+    closest sample; the closest sample itself, in *world* coordinates; and the row of `points` it
+    came from, i.e. which geom of the group is the near one.
+
+    The unit vector is what makes opposition measurable -- two grips are opposed when their
+    vectors point opposite ways, which is a dot product rather than an angle, so there is no
+    wrap-around to handle. M8: `contact` and `which` are what let a caller ask how fast that
+    surface is sweeping around the cap, which needs the point in the world frame and the body
+    that carries it.
     """
     local = (points - origin) @ mat                        # world -> cap frame
     gaps = surface_distance(local, cap_radius, cap_half_h) - geom_radius[:, None]
@@ -86,7 +100,75 @@ def grasp_geometry(points, geom_radius, origin, mat, cap_radius: float, cap_half
     closest = local.reshape(-1, 3)[best]
     planar = closest[:2]
     norm = (planar[0] ** 2 + planar[1] ** 2) ** 0.5
-    return flat[best], planar / (norm + 1e-9)
+    return (
+        flat[best],
+        planar / (norm + 1e-9),
+        points.reshape(-1, 3)[best],
+        best // points.shape[1],
+    )
+
+
+def triple(a, b, c):
+    """Scalar triple product `a . (b x c)`, componentwise, for (..., 3) inputs.
+
+    Written out rather than via `cross` because this module is shared between the env (jax
+    arrays, under `jit`) and the CPU scripts (numpy), and the two libraries' `cross`/`stack` do
+    not interchange.
+    """
+    return (
+        a[..., 0] * (b[..., 1] * c[..., 2] - b[..., 2] * c[..., 1])
+        + a[..., 1] * (b[..., 2] * c[..., 0] - b[..., 0] * c[..., 2])
+        + a[..., 2] * (b[..., 0] * c[..., 1] - b[..., 1] * c[..., 0])
+    )
+
+
+def axial_sweep(point, velocity, origin, axis):
+    """How fast `point` is going *around* the line `(origin, axis)`, in rad/s.
+
+    M8: this is the quantity a non-slipping grip hands to the cap. A pad in contact with the cap
+    wall and sweeping around the cap axis at omega turns the cap at omega -- that is the rolling
+    constraint, and it is radius-independent, so it holds whether the pad sits at the cap's own
+    16 mm or at the 24 mm a knuckle reaches from. Motion straight at the cap (pressing) or along
+    its axis (sliding up the wall) contributes nothing, which is correct: neither turns it.
+
+    `axis` must be a unit vector. `axis x planar` has magnitude `r` and points along the tangent,
+    so `v . (axis x planar) / r**2` is `(v . tangent) / r` with no square roots and no division
+    by a radius that could be zero at the axis itself.
+    """
+    rel = point - origin
+    along = (rel * axis).sum(-1)
+    planar = rel - along[..., None] * axis
+    r2 = (planar * planar).sum(-1)
+    return triple(velocity, axis, planar) / (r2 + 1e-12)
+
+
+def cylinder_sdf(local, radius: float, half_h: float):
+    """Signed distance from a point to a z-aligned cylinder, the point given in its frame.
+
+    Negative inside, and exact. `surface_distance` below is the same quantity *outside* the
+    cylinder and is kept for the cap, where it is all the callers need and where its numbers are
+    on the record from M1 onwards; this one is for the bottle, where a finger sweeping over the
+    shoulder really can end up inside and `surface_distance` would report it as comfortably
+    clear (it squares the radial term, so inside reads positive).
+
+    Plain operators, so this serves the env under `jit` and the CPU scripts alike.
+    """
+    radial = (local[..., 0] ** 2 + local[..., 1] ** 2) ** 0.5 - radius
+    axial = abs(local[..., 2]) - half_h
+    out_r, out_a = radial * (radial > 0), axial * (axial > 0)
+    outside = (out_r ** 2 + out_a ** 2) ** 0.5
+    deepest = radial * (radial > axial) + axial * (radial <= axial)  # max(radial, axial)
+    return outside + deepest * (deepest < 0)
+
+
+def cylinder_gaps(points, geom_radius, geom_pos, geom_mat, radius: float, half_h: float):
+    """Surface-to-surface gaps from a group of geoms to one cylinder, same shape as `points[..., 0]`.
+
+    `points` is (n_geoms, samples, 3) in world coordinates and `geom_radius` is (n_geoms,), as
+    produced by `segment_points`; `geom_pos`/`geom_mat` place the cylinder.
+    """
+    local = (points - geom_pos) @ geom_mat
+    return cylinder_sdf(local, radius, half_h) - geom_radius[:, None]
 
 
 def cap_dimensions(model: mujoco.MjModel) -> tuple[float, float]:

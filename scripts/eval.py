@@ -59,6 +59,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import jax.numpy as jp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from capturn import checkpoints  # noqa: E402
@@ -291,15 +292,21 @@ def make_policy(ckpt: pathlib.Path, deterministic: bool):
 # --------------------------------------------------------------------------------------
 # summary
 # --------------------------------------------------------------------------------------
-def grasp_summary(traj: dict[str, np.ndarray], live: np.ndarray, env_config) -> dict:
-    """The lateral pinch, measured the way the reward measures it.
+def grasp_summary(traj: dict[str, np.ndarray], live: np.ndarray, env, env_config) -> dict:
+    """The lateral pinch, measured by the reward's own code.
 
     `opposition` is +1 when the thumb and the index finger meet the cap from opposite sides and
-    -1 when they crowd the same side, and the reward multiplies by `clip(opposition, 0, 1)` --
-    so a negative median means the grasp term is contributing *nothing* and the policy is
-    succeeding on rotation alone. `held` is the fraction of steps inside `contact_distance`,
-    the same threshold the grasp-loss termination uses: a policy can keep that satisfied, and
-    so never terminate, while still never closing an opposed pinch.
+    -1 when they crowd the same side; the reward maps it onto (0, 1] saturating at
+    `opposition_target_deg`, so a negative median means the grasp term is contributing almost
+    nothing and the policy is succeeding on rotation alone. `held` is the fraction of steps
+    inside `contact_distance`, the same threshold the grasp-loss termination uses: a policy can
+    keep that satisfied, and so never terminate, while still never closing an opposed pinch.
+
+    M6: the term is read from `env.pinch_quality` rather than restated here. This function used
+    to carry its own copy, and after the reward was reshaped at M5 the copy went stale and
+    reported 0.000 where the real value was 0.103 -- the second time in the project that a
+    number computed to check the reward turned out to be measuring something else. There is now
+    one implementation and this calls it.
     """
     if "thumb_gap" not in traj:          # a trajectory recorded before these were collected
         return {}
@@ -307,12 +314,7 @@ def grasp_summary(traj: dict[str, np.ndarray], live: np.ndarray, env_config) -> 
     opposition = traj["opposition"][live]
     worst = np.maximum(thumb, index)
     contact = float(env_config.contact_distance)
-    sharpness = float(env_config.reward_config.grasp_sharpness)
-    # Mirrors `CapTurn._get_reward`'s `grasp` term and must be changed with it. It is NOT
-    # `clip(opposition, 0, 1)` any more: that gate is what made the term inert, and reporting
-    # the clipped form against the reshaped reward understates it wherever opposition is
-    # negative -- which is exactly the regime worth reading. NOTES.md, M5.
-    term = np.exp(-sharpness * worst) * (0.5 * (1.0 + opposition))
+    term = np.asarray(env.pinch_quality(jp.array(thumb), jp.array(index), jp.array(opposition)))
     return {
         "thumb_gap_mm": {"median": float(np.median(thumb)) * 1e3,
                          "p90": float(np.percentile(thumb, 90)) * 1e3},
@@ -323,6 +325,7 @@ def grasp_summary(traj: dict[str, np.ndarray], live: np.ndarray, env_config) -> 
         "frac_steps_both_within_contact_distance": float((worst <= contact).mean()),
         "contact_distance_mm": contact * 1e3,
         "grasp_term_median": float(np.median(term)),
+        "opposition_target_deg": float(env_config.reward_config.opposition_target_deg),
     }
 
 
@@ -410,7 +413,7 @@ def summarize(env: CapTurn, traj: dict[str, np.ndarray], args: argparse.Namespac
             tip: float(regrips[:, i].mean()) for i, tip in enumerate(scene.GAIT_TIPS)
         },
         "episodes_with_no_regrip": float((regrips.sum(axis=1) == 0).mean()),
-        "grasp": grasp_summary(traj, live_steps, env._config),
+        "grasp": grasp_summary(traj, live_steps, env, env._config),
         "gait_tip_count": len(scene.GAIT_TIPS),
         "simultaneous_contacts": {
             "median": float(np.median(simultaneous)),

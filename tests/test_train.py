@@ -29,6 +29,7 @@ import pathlib
 import subprocess
 import sys
 
+import mujoco
 import numpy as np
 import pytest
 
@@ -40,6 +41,7 @@ import eval as eval_script  # noqa: E402
 import train as train_script  # noqa: E402
 from capturn import checkpoints  # noqa: E402
 from capturn import config as capturn_config  # noqa: E402
+from capturn import scene  # noqa: E402
 
 slow = pytest.mark.skipif(
     not os.environ.get("HAND_SIM_SLOW"),
@@ -547,6 +549,12 @@ def test_smoke_train_then_eval_produces_a_loadable_policy(tmp_path):
     assert summary["worst_penetration_mm"] <= 0.0
 
     npz = np.load(tmp_path / "ep_ep00.npz")
-    assert npz["qpos"].shape[1] == 25 and len(npz["qpos"]) >= 2
+    # Read from the model, not written out: this said 25 until M8 found it. M7 added `rh_WRJ0`
+    # and took `nq` from 25 to 26, and this is the third place in the suite that was still
+    # asserting a pre-M7 count -- all three only in the slow tier, which is why they went
+    # unnoticed. A recorded `qpos` that does not match the model cannot be replayed at all, so
+    # the check is worth keeping; the number is not worth writing down.
+    model = mujoco.MjModel.from_xml_path(str(scene.SCENE))
+    assert npz["qpos"].shape[1] == model.nq and len(npz["qpos"]) >= 2
     assert float(npz["ctrl_dt"]) == 0.05, "render.py reads the playback rate from here"
     assert len(npz["cap_angle"]) == len(npz["qpos"])

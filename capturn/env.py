@@ -28,6 +28,33 @@ One actor frame is 70 numbers, and `state` is the last `history_len` (3) of them
 The actor deliberately cannot see the cap angle. The cap is rotationally symmetric, so the
 policy does not need it and could not measure it on hardware.
 
+The reward, and why it is a product (M6)
+----------------------------------------
+The task is not "rotate the cap", it is "rotate the cap the way a person does" -- a lateral
+pinch, a bounded stroke, let go, take another. Through M5 the reward *added* a rotation term to
+a grasp term, which made those two alternatives rather than a single behaviour, and the
+arithmetic chose the wrong one: over a 1200-step episode an exploit grinding the cap one-sidedly
+returned 60.0 against 54.9 for the scripted reference gait. Every M5 seed duly found the
+exploit, and no amount of reshaping the grasp term could outbid the rotation term that ignored
+it.
+
+So rotation is no longer paid on its own:
+
+    twist = pinch * clip(d_theta, 0, budget) / dt
+
+* `pinch` is the grasp term itself, in [0, 1] -- both surfaces on the cap and opposed. Rotation
+  produced without a pinch pays nothing, and `slip` charges for it.
+* `budget` is what is left of `stroke_budget` (60 deg) for the *current grip*. It refills when a
+  new grip begins, so two full turns need at least twelve strokes. Nothing in the reward asks
+  for cycles; the budget is what makes them the way to score.
+
+There is deliberately no cap on the rotation *rate* and no angular-velocity cost. A gait is
+bursty -- the reference gait's rate is 0.172 rad/s at the median and 3.811 rad/s at the peak --
+so a per-step rate bound punishes the reference behaviour harder than the exploit it was aimed
+at. The M5 `rotate_clip` of 1.0 paid the reference gait 50.1% of its own rotation. Measured in
+NOTES.md, M6; `scripts/score_reward.py` is what measures it, and `tests/test_reward_ranking.py`
+pins the ordering so a later change to the weights cannot quietly invert it again.
+
 Metrics, and why they are rates rather than levels
 --------------------------------------------------
 Brax reads `state.metrics` through `EvalWrapper`, which **sums** each one over the episode's
@@ -59,11 +86,13 @@ So the rule here is: `info` holds only per-episode constants (`cap_angle_init`, 
 * cumulative rotation is `cap_angle - cap_angle_init`, both consistent across a reset
 * success is recomputed from that rotation rather than latched in a flag
 
-Three fields are exceptions -- `last_act`, `last_last_act` and `action_buffer`, which feed the
-action-rate cost, and `last_cap_angle`, which feeds the finite difference behind the rotate
-reward. They genuinely evolve and have nowhere else to live. Stale, they cost one spurious
-action-rate term on the first step of an episode (as in Playground's own envs) and one rotate
-term, which the term's own clip bounds at -0.5 however far the previous episode had turned.
+Several fields are exceptions -- `last_act`, `last_last_act` and `action_buffer`, which feed the
+action-rate cost, `last_cap_angle`, which feeds the finite difference behind the twist reward,
+and `grip_held` / `grip_angle_start`, which carry the stroke budget. They genuinely evolve and
+have nowhere else to live. Stale, they cost one spurious action-rate term on the first step of
+an episode (as in Playground's own envs), one `backdrive` term bounded by `backdrive_clip`
+however far the previous episode had turned, and at most one stroke's worth of withheld `twist`
+pay until the next regrip refills the budget.
 `ppo_config()` sets `full_reset=True`, where `info` is reset too and none of this arises; the
 separate and stronger reason for that setting is that the reset randomisation is otherwise
 frozen after the first episode.
@@ -71,6 +100,7 @@ frozen after the first episode.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional, Union
 
 import jax
@@ -84,8 +114,13 @@ from mujoco_playground._src import mjx_env
 from capturn import scene
 from capturn.config import default_config
 
-N_HAND_JOINTS = 24
-N_ACTUATORS = 20
+# M7: 24 -> 25 and 20 -> 21. `rh_WRJ0`, the forearm roll, is the pronation a person actually
+# unscrews a cap with; Menagerie's hand stops at the wrist and M6 measured what that costs
+# (NOTES.md, M6 -- the twist had to come from the fingers, so every policy drove the cap at
+# 110-270 deg/s with a motion no hand makes). The joint is declared on `rh_forearm`, the root
+# body, so it leads both qpos and ctrl.
+N_HAND_JOINTS = 25
+N_ACTUATORS = 21
 # Zeros in the nominal phase. Sized for the eight model-level scalars in the PRD's DR table plus
 # the bottle's 3-vector offset and its tilt: fingertip friction, cap friction, cap frictionloss,
 # cap damping, actuator gain, hand damping, hand frictionloss, hand armature, bottle_pos (3),
@@ -136,6 +171,9 @@ class CapTurn(mjx_env.MjxEnv):
         self._hand_qids = mjx_env.get_qpos_ids(m, hand_joints)
         self._hand_dqids = mjx_env.get_qvel_ids(m, hand_joints)
         self._cap_qid = int(m.joint(scene.CAP_JOINT).qposadr[0])
+        # M7: the forearm roll. Read by name, like everything else here -- it is qpos 0 today
+        # because the joint is declared on the root body, and that is not worth relying on.
+        self._roll_qid = int(m.joint(scene.ROLL_JOINT).qposadr[0])
 
         limits = np.array([m.joint(j).range for j in hand_joints], dtype=float)
         unlimited = np.array([not m.joint(j).limited for j in hand_joints], dtype=bool)
@@ -157,6 +195,20 @@ class CapTurn(mjx_env.MjxEnv):
         self._thumb_geoms = self._collision_geoms(m, scene.THUMB_BODIES)
         self._index_geoms = self._collision_geoms(m, scene.INDEX_BODIES)
 
+        # M6: the bottle as two z-aligned cylinders, so the reward can cost a pinch surface for
+        # entering it. `(geom id, radius, half height)`, read from the compiled model.
+        self._bottle = tuple(
+            (m.geom(g).id, float(m.geom_size[m.geom(g).id, 0]), float(m.geom_size[m.geom(g).id, 1]))
+            for g in scene.BOTTLE_GEOMS
+        )
+
+        # M6: `opposition` is `-dot` of the two radial directions, so it is `-cos(azimuth)` and
+        # reaches +1 only at 180 deg. This scales it to saturate at `opposition_target_deg`
+        # instead -- 150 deg, which is where the re-fitted pregrasp puts the pinch and the most
+        # the pose can give without reaching into the bottle neck.
+        target = float(self._config.reward_config.opposition_target_deg)
+        self._opposition_scale = 1.0 / (1.0 + math.cos(math.radians(180.0 - target)))
+
         self._buffer_len = int(self._config.action_delay.max_steps) + 1
 
     @staticmethod
@@ -170,8 +222,13 @@ class CapTurn(mjx_env.MjxEnv):
         if not ids:
             raise ValueError(f"no collision geoms on {bodies}")
         capsule = mujoco.mjtGeom.mjGEOM_CAPSULE
+        bodyid = np.array([int(m.geom_bodyid[g]) for g in ids])
         return {
             "ids": np.array(ids),
+            # M8: who carries each geom, so a caller that has found the near one can ask how fast
+            # it is moving. `rootid` is what `cvel`/`subtree_com` are referenced to.
+            "bodyid": bodyid,
+            "rootid": np.array([int(m.body_rootid[b]) for b in bodyid]),
             "radius": jp.array([float(m.geom_size[g, 0]) for g in ids]),
             # Only a capsule has an axial extent to sample along; anything else is a point.
             "half_length": jp.array(
@@ -229,6 +286,11 @@ class CapTurn(mjx_env.MjxEnv):
             "action_buffer": jp.zeros((self._buffer_len, N_ACTUATORS)),
             "last_cap_angle": cap_angle,
             "ungrasped_steps": jp.zeros((), dtype=jp.int32),
+            # M7: the previous forearm roll, for the finite difference behind `twist`. Evolves
+            # during an episode, so it is stale for one step under `full_reset=False` -- same
+            # class as `last_cap_angle` above, costing at most one step of mispriced twist.
+            # `ppo_config()` asks for `full_reset=True`, where it does not arise.
+            "last_roll": self._init_q[self._roll_qid],
         }
 
         # Every metric here is defined so that *summing it over an episode* is the
@@ -246,6 +308,29 @@ class CapTurn(mjx_env.MjxEnv):
         metrics["index_gap_per_step"] = jp.zeros(())
         metrics["opposition_per_step"] = jp.zeros(())
         metrics["idle_contact_per_step"] = jp.zeros(())
+        # M7: what makes the motion human, in four numbers whose episode sums are the
+        # quantities worth reading. `tracked_rotation / cap_rotation_abs` is the headline --
+        # at M7 the fraction of the cap's travel the *forearm* drove; at M8 the fraction the
+        # two pads carried without slipping, which is the physical quantity M7 was reaching
+        # for. Near 1 is a person unscrewing a cap; near 0 is a cap being ground round under
+        # fingers that are not moving with it.
+        # `roll_travel / (2 * range)` is the effective stroke count, which replaces the
+        # `strokes` metric and its ~40% undercount (NOTES.md, M6) rather than fixing it. It is
+        # now a report on how the policy chose to produce the sweep, not a term in the reward.
+        metrics["tracked_rotation"] = jp.zeros(())
+        metrics["grind_rotation"] = jp.zeros(())
+        metrics["roll_travel"] = jp.zeros(())
+        metrics["slip_rotation"] = jp.zeros(())
+        # M8: and how the sweep was produced -- the two pads' angular rates about the cap axis.
+        # A gait that straightens the index finger shows up here and nowhere else.
+        metrics["thumb_sweep_per_step"] = jp.zeros(())
+        metrics["index_sweep_per_step"] = jp.zeros(())
+        # M8: `finger_carried_rotation / tracked_rotation` is the headline for *how human* the
+        # motion is, as opposed to how well it scores. The reward pays either route equally on
+        # purpose, so this is the only thing that says which one a policy picked.
+        metrics["finger_carried_rotation"] = jp.zeros(())
+        metrics["pinch_per_step"] = jp.zeros(())
+        metrics["bottle_intrusion_per_step"] = jp.zeros(())
 
         obs = self._get_obs(data, info, jp.zeros(self._config.history_len * FRAME_SIZE))
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
@@ -265,34 +350,22 @@ class CapTurn(mjx_env.MjxEnv):
         )
         data = mjx_env.step(self.mjx_model, state.data, target, self.n_substeps)
 
-        cap_angle = self._cap_angle(data)
-        d_theta = cap_angle - info["last_cap_angle"]
-        rotation = cap_angle - info["cap_angle_init"]
-
-        # Computed once and threaded through: the reward, the termination and three metrics
-        # all want it, and it walks every collision geom on two fingers.
-        grasp = self.grasp_state(data)
-        thumb_gap, index_gap, opposition = grasp
-
-        # M5: a gait *has* to let go to regrip, so losing contact for an instant is not a
-        # failure -- terminating on it would end the M1 gait on 15% of its own steps. What
-        # separates the two is how long the grasp stays off: the scripted gait's longest
-        # release is 3 control steps, the flick policy hovers for 18 at a time, 11 times an
-        # episode. The counter resets to zero the moment both surfaces are back on the cap.
-        ungrasped = jp.maximum(thumb_gap, index_gap) > self._config.contact_distance
-        info["ungrasped_steps"] = (info["ungrasped_steps"] + 1) * ungrasped
+        aux = self.evaluate(data, action, info)
+        terms = aux["terms"]
+        d_theta, thumb_gap = aux["d_theta"], aux["thumb_gap"]
+        index_gap, opposition = aux["index_gap"], aux["opposition"]
+        pinch, bottle = aux["pinch"], aux["bottle"]
 
         done = self._get_termination(data, info["ungrasped_steps"])
-        terms = self._get_reward(data, action, info, d_theta, rotation, grasp)
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in terms.items()}
         # Playground's convention: the terms are rates and the sum is integrated over the
-        # control period. The rotate term is then literally radians turned this step.
+        # control period. `twist` is then literally the budgeted radians this step, scaled by
+        # how good the pinch producing them was.
         reward = sum(rewards.values()) * self.dt
 
         info["action_buffer"] = buffer
         info["last_last_act"] = info["last_act"]
         info["last_act"] = action
-        info["last_cap_angle"] = cap_angle
 
         # Built after `last_act` is updated, so the frame carries the action that produced the
         # state it describes. Playground's Leap env builds it before, and is one step behind.
@@ -302,18 +375,141 @@ class CapTurn(mjx_env.MjxEnv):
             state.metrics[f"reward/{k}"] = v
         state.metrics["cap_rotation"] = d_theta
         state.metrics["cap_rotation_abs"] = jp.abs(d_theta)
-        state.metrics["cap_angvel_per_step"] = self._cap_angvel(data)
+        state.metrics["cap_angvel_per_step"] = aux["cap_angvel"]
         state.metrics["success"] = terms["success"]
         state.metrics["thumb_gap_per_step"] = thumb_gap
         state.metrics["index_gap_per_step"] = index_gap
         state.metrics["opposition_per_step"] = opposition
         state.metrics["idle_contact_per_step"] = terms["idle_contact"]
+        state.metrics["tracked_rotation"] = aux["tracked"]
+        state.metrics["grind_rotation"] = aux["grind"]
+        state.metrics["thumb_sweep_per_step"] = aux["sweep"][0]
+        state.metrics["index_sweep_per_step"] = aux["sweep"][1]
+        state.metrics["finger_carried_rotation"] = aux["finger_carried"]
+        state.metrics["roll_travel"] = jp.abs(aux["d_roll"])
+        state.metrics["slip_rotation"] = terms["slip"] * self.dt
+        state.metrics["pinch_per_step"] = pinch
+        state.metrics["bottle_intrusion_per_step"] = bottle
 
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
 
     # ---------------------------------------------------------------------------------
     # observation, reward, termination
     # ---------------------------------------------------------------------------------
+    def evaluate(self, data: mjx.Data, action: jax.Array, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Everything that happened this step: the reward terms, and the measures behind them.
+
+        `step` calls this; so does `scripts/score_reward.py`, over states read back from a saved
+        trajectory. That is the point of it being a method rather than inline code -- a scorer
+        that re-implemented the reward would be a second implementation to keep in step, and
+        NOTES.md M5 records two reported numbers that drifted from the thing they claimed to
+        measure exactly that way.
+
+        Mutates the `info` fields it owns -- `last_cap_angle`, `ungrasped_steps` and the grip
+        machine -- so a caller stepping through a trajectory carries state the same way `step`
+        does. It does *not* touch `last_act`, which the action-rate cost reads as the previous
+        step's action and which `step` updates afterwards.
+        """
+        cap_angle = self._cap_angle(data)
+        d_theta = cap_angle - info["last_cap_angle"]
+        rotation = cap_angle - info["cap_angle_init"]
+
+        # Computed once and threaded through: the reward, the termination and five metrics
+        # all want it, and it walks every collision geom on two fingers.
+        thumb_gap, index_gap, opposition, bottle, sweep = self.pinch_state(data)
+        pinch = self.pinch_quality(thumb_gap, index_gap, opposition)
+
+        # M8: how much of the cap's motion the *grip* carried -- the rolling constraint, applied
+        # at the two pads.
+        #
+        # M7 asked this of the forearm roll alone, and that was wrong twice over. It is wrong as
+        # biomechanics: a person unscrewing a cap straightens the index finger and draws the
+        # thumb across it, and pronates as well -- the fingers are not passive. And it is wrong
+        # on this scene's own numbers. Per radian of joint, measured at the contact points of the
+        # re-fitted pose, `rh_FFJ3` sweeps the index pad -106.7 deg around the cap axis while
+        # `rh_WRJ0` manages -38.5: the index finger is 2.8x the lever the forearm is. M7 charged
+        # every bit of that at `freewheel = -0.5`, so the reward was training out the
+        # contribution that does most of the work. (On the M7 pose, which gripped the cap's
+        # bottom lip, the same two numbers were -121 and -19 -- a 6x gap. Fixing the pose
+        # narrowed it, mostly by making the roll better, and the ordering is unchanged.)
+        #
+        # The forearm roll is also not a clean substitute for the cap's rotation, because its
+        # axis is not quite the cap's: the same roll sweeps the thumb pad -47.9 deg/rad and the
+        # index pad -38.5, a ratio of 0.80. Two pads cannot both hold a cap turning at one rate
+        # unless they sweep at one rate, so the shortfall is slip. On the M7 pose the same ratio
+        # was 0.46 (-41.5 against -19.1), which is where that milestone's measured steady-state
+        # cap/roll ratio of 0.65 went -- slip, mispriced as tracked rotation.
+        #
+        # So ask the pads directly. `sweep` is each pad's angular rate about the cap axis; a
+        # non-slipping contact hands exactly that to the cap. The pair can only carry the lesser
+        # of the two -- if they disagree, one of them is sliding -- so `min` is the ceiling, and
+        # it is the whole reason this term rewards coordination. Shearing the wrist sweeps the
+        # thumb +199 deg/rad and the index -226: a large motion, a `min` of zero, nothing paid.
+        # Pronating sweeps both the same way. Extending the index while the thumb draws across
+        # sweeps both the same way too, and that is the human motion.
+        # `sweep` is a rate and `d_theta` is the angle accumulated over the whole 50 ms control
+        # step, so the sweep is multiplied up to an angle over the same step. That treats the
+        # end-of-step rate as the step's mean rate, which is first order -- the same order as
+        # reading the cap's own travel from one hinge value at each end, and `no_slip_ratio` is
+        # the margin for it.
+        #
+        # A trapezoid between this step's rate and the previous one was tried and is *not* kept.
+        # It is the better estimator inside the env, where `qvel` is instantaneous, but it is the
+        # worse one in `scripts/score_reward.py`, which reconstructs `qvel` as a control-rate
+        # difference of `qpos` -- so the sweep it computes is already a step average, and
+        # averaging two of those smears the stroke across 2 steps and reports slip that is an
+        # artefact of the scorer. Measured: it moved the reference gait's slip from 183 deg to
+        # 201, in the wrong direction and for the wrong reason. The scorer is how a reward change
+        # gets checked before a two-hour GPU run, so it is worth more than the half-step of
+        # accuracy.
+        worse_gap = jp.maximum(thumb_gap, index_gap)
+        rcfg = self._config.reward_config
+        carried = jp.maximum(jp.min(sweep), 0.0) * self.dt * rcfg.no_slip_ratio
+        tracked = jp.clip(d_theta, 0.0, carried)
+        # What the pads did *not* carry: the cap outran the grip holding it. Slip at the contact.
+        grind = jp.maximum(d_theta - carried, 0.0)
+
+        # Reported, not paid. The roll is one way to produce `sweep` and no longer a term.
+        roll = data.qpos[self._roll_qid]
+        d_roll = roll - info["last_roll"]
+        # M8: and which way it *was* produced. `tracked` credited to the fingers is the part of
+        # it the pads carried while the forearm was not moving -- the one number that separates
+        # "the hand turned the cap" from "the arm did". See `forearm_still_deg`.
+        forearm_still = jp.abs(d_roll) < math.radians(rcfg.forearm_still_deg)
+        finger_carried = tracked * forearm_still
+
+        # M5: a gait *has* to let go to regrip, so losing contact for an instant is not a
+        # failure -- terminating on it would end the M1 gait on 15% of its own steps. What
+        # separates the two is how long the grasp stays off: the scripted gait's longest
+        # release is 3 control steps, the flick policy hovers for 18 at a time, 11 times an
+        # episode. The counter resets to zero the moment both surfaces are back on the cap.
+        ungrasped = worse_gap > self._config.contact_distance
+        info["ungrasped_steps"] = (info["ungrasped_steps"] + 1) * ungrasped
+
+        # Last, because every finite difference above reads the previous values.
+        info["last_cap_angle"] = cap_angle
+        info["last_roll"] = roll
+
+        return {
+            "terms": self._get_reward(
+                data, action, info, d_theta, rotation, pinch, tracked, grind, bottle
+            ),
+            "cap_angle": cap_angle,
+            "d_theta": d_theta,
+            "rotation": rotation,
+            "thumb_gap": thumb_gap,
+            "index_gap": index_gap,
+            "opposition": opposition,
+            "bottle": bottle,
+            "pinch": pinch,
+            "tracked": tracked,
+            "finger_carried": finger_carried,
+            "grind": grind,
+            "sweep": sweep,
+            "d_roll": d_roll,
+            "cap_angvel": self._cap_angvel(data),
+        }
+
     def _get_obs(
         self, data: mjx.Data, info: Dict[str, Any], history: jax.Array
     ) -> Dict[str, jax.Array]:
@@ -353,9 +549,12 @@ class CapTurn(mjx_env.MjxEnv):
         info: Dict[str, Any],
         d_theta: jax.Array,
         rotation: jax.Array,
-        grasp: tuple[jax.Array, jax.Array, jax.Array],
+        pinch: jax.Array,
+        tracked: jax.Array,
+        grind: jax.Array,
+        bottle: jax.Array,
     ) -> Dict[str, jax.Array]:
-        thumb_gap, index_gap, opposition = grasp
+        cfg = self._config.reward_config
         threshold = self._config.success_rotation
         # Fires on the control step that crosses the threshold going forward. A latch in `info`
         # would be exactly one-time, but it evolves during the episode and so would go stale
@@ -363,7 +562,27 @@ class CapTurn(mjx_env.MjxEnv):
         # than a bonus that can fire twice if the cap happens to oscillate across 4*pi.
         crossed = (rotation >= threshold) & (rotation - d_theta < threshold) & (d_theta > 0)
         return {
-            "rotate": jp.clip(d_theta / self.dt, -0.5, self._config.reward_config.rotate_clip),
+            # M6: replaces `rotate`, which was `clip(d_theta/dt, -0.5, rotate_clip)` -- paid for
+            # rotation however it was produced, and *added* to the grasp term rather than gated
+            # by it. Two measurements condemned it. (1) Summed over a 1200-step episode an
+            # exploit grinding the cap at the clip returned 60.0 against 54.9 for the scripted
+            # gait, so the reward preferred the exploit, which is what every M5 seed found.
+            # (2) The clip itself paid the reference gait only 50.1% of the rotation it
+            # achieved, because a gait is bursty (median 0.172 rad/s, peak 3.811) while a grind
+            # sits at the clip forever -- so the clip was a subsidy to the exploit, and
+            # tightening it would have doubled down. See NOTES.md, M6.
+            #
+            # M7: the product is now `pinch` (the grasp, 0 to 1) times the rotation the
+            # *forearm roll* accounts for. Three things have to coincide to be paid: the pinch
+            # closed, the hand turning, and the cap going with it. Turning the cap without a
+            # pinch pays nothing however fast; holding a pinch without rolling pays nothing;
+            # and rolling without the cap following pays nothing either. That is the human
+            # motion stated as an identity rather than approximated by a budget.
+            #
+            # M8: same shape, but the middle condition is "the *pads* sweeping around the cap"
+            # rather than "the forearm rolling". The forearm was a proxy that excluded the
+            # fingers, and on this hand the fingers are the stronger lever by 2.8x.
+            "twist": pinch * tracked / self.dt,
             # M5: replaces `reach`, which measured how close three fingertip *sites* were to the
             # cap and so could not see the grasp the first policy actually used -- the side of
             # the index finger, with the thumb absent. This asks for the real thing: both
@@ -383,19 +602,48 @@ class CapTurn(mjx_env.MjxEnv):
             # has a constant non-zero derivative everywhere, including the same-side region the
             # policy actually starts in. Crowding the same side still scores poorly (0.19 at
             # -0.627 against 1.0 fully opposed) -- it is no longer *unlearnable*.
-            "grasp": (
-                jp.exp(-self._config.reward_config.grasp_sharpness
-                       * jp.maximum(thumb_gap, index_gap))
-                * (0.5 * (1.0 + opposition))
-            ),
+            #
+            # M6: the same term, now computed by `pinch_quality` because it is also the gate on
+            # `twist`, with two corrections. It saturates at 150 deg of opposition rather than
+            # 180, which is where the pose can actually put the pinch, and the gap is floored at
+            # zero so that penetrating the cap cannot score above 1.0 (the idle term was already
+            # guarded this way; this one was not).
+            "grasp": pinch,
+            # M6: rotation the pinch did not produce, charged at the rate it happens. A cap
+            # driven round by a knuckle or flicked loose is charged for all of it; a clean pinch
+            # for almost none. Against `twist` at 1.0 the two cancel at `pinch = 0.2`, so
+            # turning the cap with worse than a fifth of a grasp is worth less than leaving it
+            # alone.
+            "slip": (1.0 - pinch) * jp.abs(d_theta) / self.dt,
+            # M7, renamed and redefined at M8. It was `freewheel`: cap rotation the *forearm*
+            # did not produce, which charged the fingers for working. It is now cap rotation the
+            # *pads* did not carry -- the grip is closed, the cap turned, and no contact surface
+            # went with it, so the cap is sliding under the fingers. The name changed with the
+            # meaning on purpose: NOTES.md M5 records two numbers that drifted away from what
+            # they claimed to measure while keeping their names, and that is the failure this
+            # rename is avoiding.
+            #
+            # `slip` is blind to this by construction -- the grip is good, so its `(1 - pinch)`
+            # factor is near zero. Gated on `pinch` so a cap free-spinning after release is
+            # charged once, by `slip`, rather than twice.
+            "grind": pinch * grind / self.dt,
+            # M6: losing ground. The old `rotate` clipped its downside at -0.5 while paying up
+            # to +1.0, so a cap shaken symmetrically back and forth was worth +0.5 a cycle --
+            # never observed, but paid for. This is unclipped up to `backdrive_clip`, which only
+            # exists so a numerical lurch cannot dominate an episode.
+            "backdrive": jp.clip(-jp.minimum(d_theta, 0.0) / self.dt, 0.0, cfg.backdrive_clip),
+            # M6: a pinch surface inside the bottle's margin, summed over the two fingers.
+            # Nothing costed this before and the reward was actively pulling the policy into it,
+            # by paying for opposition all the way to 180 deg -- where the far side of the cap is
+            # the bottle neck. Zero on the reference gait, whose closest approach is 3.41 mm.
+            "bottle": bottle,
             # M5: the other half of "a two-finger pinch". `grasp` says what must be on the cap;
             # this says what must be off it. Same exponential as `grasp` so the two are on one
             # scale: 1.0 per finger at contact, 0.37 at 10 mm, 0.05 at 30 mm, where the ring and
             # little fingers already sit and so pay nothing. Clipped at zero from below so that
             # penetrating the cap cannot score better than resting on it.
             "idle_contact": jp.sum(jp.exp(
-                -self._config.reward_config.idle_sharpness
-                * jp.maximum(self.idle_tip_gaps(data), 0.0)
+                -cfg.idle_sharpness * jp.maximum(self.idle_tip_gaps(data), 0.0)
             )),
             "action_rate": jp.sum(jp.square(action - info["last_act"])),
             "torques": jp.sum(jp.square(data.actuator_force)),
@@ -433,8 +681,10 @@ class CapTurn(mjx_env.MjxEnv):
         """Fingertip positions in the cap frame, (len(sensors), 3)."""
         return jp.stack([self._sensor(data, s) for s in sensors])
 
-    def grasp_state(self, data: mjx.Data) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """`(thumb_gap, index_gap, opposition)` -- what a bottle-cap grasp is made of.
+    def pinch_state(
+        self, data: mjx.Data
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+        """`(thumb_gap, index_gap, opposition, bottle_intrusion, sweep)` -- the pinch, in one pass.
 
         The gaps are surface-to-surface, in metres, to the closest point on any collision geom
         of that finger; `opposition` is +1 when the two touch the cap from exactly opposite
@@ -442,23 +692,97 @@ class CapTurn(mjx_env.MjxEnv):
         the side of the index finger, so what matters is that both are on the cap and that they
         are opposed -- not which part of the finger is doing it.
 
-        Public because `scripts/eval.py` reports all three.
+        `bottle_intrusion` is how far the two fingers reach into the bottle's margin, summed:
+        0 while both stay `bottle_margin` clear, 1 per finger at contact, and larger inside,
+        bounded at 5 so one bad step cannot dominate a return. M6 -- it shares this walk over
+        the finger geoms with the grasp measurement because that walk is the expensive part.
+
+        `sweep` is `(thumb, index)` in rad/s: how fast each finger's near surface is travelling
+        *around* the cap axis. M8 -- the rotation a non-slipping grip is actually delivering, and
+        the ceiling on what `twist` pays. See `_pad_velocity`.
         """
         origin = data.site_xpos[self._cap_site]
         mat = data.site_xmat[self._cap_site].reshape(3, 3)
+        # The site rides the cap, so `mat` turns with it -- but its third column is the hinge
+        # axis, which rotation about that axis leaves alone. Reading the axis from the same
+        # place as the origin keeps the two consistent if the bottle ever stops being upright.
+        axis = mat[:, 2]
+        margin = self._config.reward_config.bottle_margin
 
-        def closest(group: dict[str, Any]) -> tuple[jax.Array, jax.Array]:
+        def measure(group: dict[str, Any]) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
             ids = group["ids"]
             points = scene.segment_points(
                 data.geom_xpos[ids], data.geom_xmat[ids].reshape(-1, 3, 3), group["half_length"]
             )
-            return scene.grasp_geometry(
+            gap, direction, contact, which = scene.grasp_geometry(
                 points, group["radius"], origin, mat, self._cap_radius, self._cap_half_height
             )
+            sweep = scene.axial_sweep(
+                contact, self._pad_velocity(data, group, which, contact), origin, axis
+            )
+            clearance = jp.min(jp.stack([
+                jp.min(scene.cylinder_gaps(
+                    points, group["radius"], data.geom_xpos[gid],
+                    data.geom_xmat[gid].reshape(3, 3), radius, half_h,
+                ))
+                for gid, radius, half_h in self._bottle
+            ]))
+            return gap, direction, jp.clip(1.0 - clearance / margin, 0.0, 5.0), sweep
 
-        thumb_gap, thumb_dir = closest(self._thumb_geoms)
-        index_gap, index_dir = closest(self._index_geoms)
-        return thumb_gap, index_gap, -jp.dot(thumb_dir, index_dir)
+        thumb_gap, thumb_dir, thumb_bottle, thumb_sweep = measure(self._thumb_geoms)
+        index_gap, index_dir, index_bottle, index_sweep = measure(self._index_geoms)
+        return (
+            thumb_gap,
+            index_gap,
+            -jp.dot(thumb_dir, index_dir),
+            thumb_bottle + index_bottle,
+            jp.stack([thumb_sweep, index_sweep]),
+        )
+
+    @staticmethod
+    def _pad_velocity(
+        data: mjx.Data, group: dict[str, Any], which: jax.Array, point: jax.Array
+    ) -> jax.Array:
+        """World velocity of `point`, taken as rigidly attached to the geom `which` of `group`.
+
+        Instantaneous, from `cvel`, rather than a finite difference of the point's position --
+        deliberately. The point is whichever sample of whichever geom is nearest the cap, and
+        that identity hops between samples and between the index finger's three segments as the
+        hand moves. Differencing two positions across such a hop reports a velocity of metres
+        per second that nothing physically moved at. Reading the velocity of the body that owns
+        the point this step has no such discontinuity.
+
+        `cvel` is MuJoCo's com-based spatial velocity -- `[angular, linear]` in world axes, the
+        linear part taken at the root body's `subtree_com` -- so the velocity at an arbitrary
+        point is the usual rigid-body shift. This is what `mj_objectVelocity` does internally.
+        """
+        body = jp.take(group["bodyid"], which)
+        cvel = jp.take(data.cvel, body, axis=0)
+        com = jp.take(data.subtree_com, jp.take(group["rootid"], which), axis=0)
+        return cvel[3:] + jp.cross(cvel[:3], point - com)
+
+    def pinch_quality(
+        self, thumb_gap: jax.Array, index_gap: jax.Array, opposition: jax.Array
+    ) -> jax.Array:
+        """How much of a lateral pinch this is, in [0, 1]. The `grasp` term, and the `twist` gate.
+
+        Both surfaces on the cap -- the worse of the two sets the exponential -- and opposed.
+        Public, and the *only* implementation: `scripts/eval.py` reports this by calling it
+        rather than recomputing it. NOTES.md M5 records two reported numbers that turned out to
+        be computed differently from the thing they claimed to measure, one of them this term,
+        so the duplicate is deliberately gone rather than merely commented.
+        """
+        cfg = self._config.reward_config
+        closed = jp.exp(
+            -cfg.grasp_sharpness * jp.maximum(jp.maximum(thumb_gap, index_gap), 0.0)
+        )
+        opposed = jp.clip((opposition + 1.0) * self._opposition_scale, 0.0, 1.0)
+        return closed * opposed
+
+    def grasp_state(self, data: mjx.Data) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """`(thumb_gap, index_gap, opposition)`, for callers that do not want the bottle term."""
+        thumb_gap, index_gap, opposition, _, _ = self.pinch_state(data)
+        return thumb_gap, index_gap, opposition
 
     def idle_tip_gaps(self, data: mjx.Array) -> jax.Array:
         """Gap from each *non*-gaiting fingertip to the cap surface, (3,).

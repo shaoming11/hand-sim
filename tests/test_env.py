@@ -79,7 +79,8 @@ def test_observation_shapes_are_fixed_and_match_the_documented_layout(env):
     }
     # the frame is the PRD's actor observation, nothing more
     assert FRAME_SIZE == N_HAND_JOINTS + 2 * N_ACTUATORS + 3 + 3
-    assert sizes["state"] == (210,) and sizes["privileged_state"] == (283,)
+    # M7: 210 -> 219 and 283 -> 294, from the extra joint and actuator (frame 70 -> 73).
+    assert sizes["state"] == (219,) and sizes["privileged_state"] == (294,)
 
 
 def test_privileged_state_contains_the_actor_history_verbatim(env):
@@ -96,20 +97,40 @@ def test_grasp_needs_the_thumb_opposed_to_the_index_not_a_one_sided_push(env):
     is a product, so being on the cap is not enough if both surfaces crowd the same side --
     which is exactly what the first trained policy did: index gripping at 0.3 mm, thumb 20 mm
     out, contacts 66 deg apart instead of opposed.
-    """
-    import jax.numpy as jp
 
-    k = env._config.reward_config.grasp_sharpness
-    term = lambda thumb, index, opp: float(
-        jp.exp(-k * jp.maximum(thumb, index)) * jp.clip(opp, 0.0, 1.0)
-    )
-    opposed = term(0.0022, 0.0064, +0.78)     # the M1 scripted gait, measured
+    M5, and M6 reshaped the opposition factor twice over. `jp.clip(opposition, 0, 1)` was a
+    cliff: flat below zero in value *and* derivative, where the trained policy sat 98.4% of the
+    time, so the term was unlearnable rather than merely small. And its peak was at 180 deg,
+    which the re-fitted pose cannot reach without putting a finger in the bottle neck. It now
+    saturates at `opposition_target_deg` and is monotone everywhere below it.
+
+    Calls the env's own term rather than restating it -- `pinch_quality` is public for that
+    reason, and NOTES.md M5 records a reported number that drifted from the reward because a
+    checker had its own copy.
+    """
+    term = lambda thumb, index, opp: float(env.pinch_quality(thumb, index, opp))
+
+    opposed = term(0.0022, 0.0064, +0.87)     # the reference gait, measured: 150.2 deg
     one_sided = term(0.0200, 0.0003, -0.34)   # the flick policy, measured
-    index_only = term(0.0200, 0.0003, +0.78)  # index gripping well, thumb simply absent
+    index_only = term(0.0200, 0.0003, +0.87)  # index gripping well, thumb simply absent
 
     assert opposed > 0.3, "a real lateral pinch must score most of the term"
-    assert one_sided == 0.0, "same-side contacts are not a grasp at any depth"
+    assert opposed > 5 * one_sided, "same-side contacts are not a grasp at any depth"
     assert opposed > 3 * index_only, "one surface on the cap must not pay like two"
+
+    # M6: a gradient everywhere, including the same-side region a fresh policy starts in
+    assert term(0.002, 0.002, -0.6) > term(0.002, 0.002, -0.8) > 0.0, (
+        "the old `clip` gate was flat here, which is what made opposition unlearnable"
+    )
+    # M6: and no pay for reaching past the pose's 150 deg into the bottle
+    target = env._config.reward_config.opposition_target_deg
+    at_target = -np.cos(np.radians(target))  # `opposition` is -cos(azimuth between the two)
+    assert term(0.0, 0.0, at_target) == pytest.approx(1.0, abs=1e-6)
+    assert term(0.0, 0.0, 1.0) == pytest.approx(1.0, abs=1e-6), (
+        "180 deg must not be worth more than the 150 the pose can reach"
+    )
+    # M6: penetrating the cap cannot score above a clean rest on it
+    assert term(-0.004, -0.004, +0.87) == pytest.approx(term(0.0, 0.0, +0.87), abs=1e-6)
 
 
 def test_grasp_counts_the_whole_index_finger_not_just_the_fingertip(env):
@@ -170,9 +191,20 @@ def test_metrics_cover_every_reward_term_and_the_task_measures(env):
         "success",  # the 4*pi crossing -> sums to the success flag
     } <= set(state.metrics)
     assert set(scales) == {
-        "rotate", "grasp", "idle_contact", "action_rate", "torques", "joint_vel", "success"
-    }, ("seven terms: the PRD's, with `reach` replaced by `grasp` and `idle_contact` added to "
-        "keep the middle finger off the cap -- NOTES.md, M5")
+        "twist", "grasp", "slip", "grind", "backdrive", "bottle",
+        "idle_contact", "action_rate", "torques", "joint_vel", "success",
+    }, ("M8: `twist` pays rotation the two pads carried without slipping and `grind` charges the "
+        "rest. It was `freewheel` through M7, which charged everything the *forearm* did not "
+        "produce and so charged the fingers for working. NOTES.md, M8")
+    assert {
+        "tracked_rotation",  # -> radians the two pads carried
+        "grind_rotation",  # -> radians the cap slid under a closed grip
+        "roll_travel",  # -> total forearm travel, i.e. the effective stroke count
+        "slip_rotation",  # -> radians the pinch did not produce
+        "thumb_sweep_per_step",  # -> how fast each pad went round the cap axis ...
+        "index_sweep_per_step",  # ... which is where "the index finger straightens" shows up
+        "finger_carried_rotation",  # -> radians the pads carried with the forearm still
+    } <= set(state.metrics), "M8: the numbers that say whether the motion is human"
 
 
 def test_reset_and_step_are_jittable(env):
@@ -207,13 +239,21 @@ def test_action_delay_buffer_is_sized_whether_or_not_delay_is_enabled():
 
 
 def test_buffer_sizing_matches_the_measured_counts():
-    assert capturn_config.NACONMAX_PER_WORLD == 44  # M2, ncollision with 2x headroom
+    # M6: 64, up from M2's 44. The 44 was probed on the *tripod* pregrasp; on the re-fitted
+    # two-finger pose `check_parity.py --probe` asks for 46 per world, so 44 was below the
+    # requirement and would have dropped contacts silently through a whole run. 64 leaves
+    # headroom for an untrained policy, which loads contacts far harder than the scripted gait
+    # the probe uses. NOTES.md, M6.
+    assert capturn_config.NACONMAX_PER_WORLD >= 46, (
+        "the re-fitted pose measures 46 per world; anything less overflows the contact buffer"
+    )
+    assert capturn_config.NACONMAX_PER_WORLD == 48
     assert capturn_config.NJMAX == 150
     # M3: 16384 allocates fine on an H200/Blackwell in a fresh process, it is just 4.6% slower
     # (30,856 vs 32,358 control-steps/s). The H100's allocation failure was the single-process
     # JAX/Warp starvation mode, not a ceiling. 8192 wins on throughput. NOTES.md, M3.
     assert capturn_config.NUM_ENVS == 8192
-    assert capturn_config.default_config().naconmax == 44 * 8192, "naconmax is a total"
+    assert capturn_config.default_config().naconmax == 48 * 8192, "naconmax is a total"
 
 
 def test_ppo_config_asks_for_asymmetric_actor_critic():
@@ -333,7 +373,12 @@ def test_vmap_over_envs(env):
     actions = jp.zeros((2, env2.action_size))
     states = jax.jit(jax.vmap(env2.step))(states, actions)
     assert states.reward.shape == (2,)
-    assert states.obs["state"].shape == (2, 210)
+    # Derived, not written out. This read `(2, 210)` until M8 found it: M7 widened the frame from
+    # 70 to 73 and updated the same constant in `test_observation_sizes_are_the_documented_ones`
+    # -- its comment says "M7: 210 -> 219" -- but not this one, so the slow tier had been failing
+    # on a stale number since then. A hardcoded size in two places is a size that will go stale
+    # in one of them.
+    assert states.obs["state"].shape == (2, env2._config.history_len * FRAME_SIZE)
     assert jp.isfinite(states.obs["privileged_state"]).all()
     # different rngs must give different episodes
     assert float(abs(states.info["cap_angle_init"][0] - states.info["cap_angle_init"][1])) > 1e-3
@@ -378,8 +423,23 @@ def test_episode_boundary_does_not_leak_rotation_or_targets():
     assert drift[last - 1] > drift[0] > 0.0
     assert drift[last + 1] == pytest.approx(env._config.action_scale * push, abs=1e-5)
 
-    # and the whole episode repeats
-    np.testing.assert_allclose(rotations[:episode_length], rotations[episode_length:], atol=1e-9)
+    # And the whole episode repeats -- *after* its first step.
+    #
+    # The boundary step itself does not, and cannot: `full_reset=False` restores `data` and
+    # leaves `info` alone, so the fields that evolve during an episode (`last_cap_angle`,
+    # `last_roll`) are one step stale when the next one starts. `CapTurn.reset` says so, and
+    # costs it at "at most one step of mispriced twist". This assertion covered the whole episode
+    # including step 0 and so asserted more than the design promises; it had been failing in the
+    # slow tier since M7 for that reason. M8 pins the documented bound instead: everything from
+    # step 1 is bit-identical, and step 0 differs by no more than one step of drift.
+    np.testing.assert_allclose(
+        rotations[1:episode_length], rotations[episode_length + 1:], atol=1e-9
+    )
+    first_step_slip = np.abs(rotations[0] - rotations[episode_length])
+    assert (first_step_slip < 1e-2).all(), (
+        "the one stale step may cost a fraction of a degree of cap rotation, not a real "
+        f"divergence: {first_step_slip}"
+    )
 
 
 @slow

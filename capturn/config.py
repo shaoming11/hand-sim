@@ -17,7 +17,26 @@ from ml_collections import config_dict
 
 # M2/M3: measured by `scripts/check_parity.py --probe` with 2x headroom. `naconmax` is a total
 # across worlds, so it scales with `num_envs`; `njmax` is per world.
-NACONMAX_PER_WORLD = 44
+#
+# M6: 44 -> 64. The M2 figure was measured on the *tripod* pregrasp, and re-running the probe on
+# the re-fitted two-finger pose asks for **46** per world (`ncollision` 23, nacon 4, nefc 41) --
+# so the configured 44 was below the requirement, which would have dropped contacts silently
+# during the run. 64 rather than 46 because the scripted gait is the gentlest loading case in the
+# project and an untrained policy is the harshest: M4 measured -4.5 mm of penetration and an
+# EPA_HORIZON flag under a random policy against the gait's -0.288 mm.
+#
+# M6, after three OOMs: 64 -> 48. The extra buffer does *not* cost "about a gigabyte of the 96
+# available" as first written -- warp's convex narrowphase allocates scratch sized off these
+# buffers on every call (`collision_convex.convex_narrowphase` -> `warp.empty`), and at 64 per
+# world that allocation starts failing mid-run: three runs died in warp with
+# "Failed to allocate 1610612736 bytes" (twice) and "402653184 bytes" (once). M5 ran 91.75M
+# steps at 44 per world without one. 48 is the compromise: above the 46 the re-fitted pose
+# measures, and a total of 393,216 against M5's proven 360,448. `njmax` 150 still clears its
+# measured 82.
+#
+# If 48 still OOMs, the next lever is NOT `num_envs` -- that is a PPO hyperparameter and moving
+# it breaks comparability with the seeds already run -- but warp's mempool release threshold.
+NACONMAX_PER_WORLD = 48
 NJMAX = 150
 
 # M3: the highest measured throughput, and it matches Playground's tuned LeapCubeRotateZAxis
@@ -97,21 +116,106 @@ def default_config() -> config_dict.ConfigDict:
             # one actually on it pays. Checked against the M1 scripted gait, which this term
             # must not punish: -5.3 of return at 100, -0.4 at 500.
             idle_sharpness=500.0,
-            # M5: was 2.0 rad/s (115 deg/s). Success needs 4*pi in 20 s, i.e. 0.63 rad/s, so 2.0
-            # paid for spinning three times faster than the task asks; the flick policy
-            # saturated this clip every step at 4.6 rad/s. 1.0 still leaves 1.6x headroom over
-            # the success rate and the M1 gait only reaches 0.11 rad/s, so nothing legitimate
-            # touches it.
-            rotate_clip=1.0,
+            # M7: `stroke_budget` and the grip state machine are gone, and the reason is that
+            # the hardware now does their job. They existed to force a release-and-regrip cycle
+            # out of a hand that could turn the cap indefinitely without one. With `rh_WRJ0`
+            # limited to 100 deg of travel, one stroke is about 90 deg of cap rotation and 4*pi
+            # needs roughly ten of them -- enforced by geometry, which no reward term can be
+            # gamed around. The `strokes` metric goes with them, which also disposes of the
+            # ~40% undercount NOTES.md M6 records rather than having to fix it.
+            #
+            # What replaces the budget is `no_slip_ratio`: the cap is only paid for turning to
+            # the extent the *forearm* turned it. Measured on the scene, an 80 deg roll moves
+            # the cap +74 deg net of the grip-ramp baseline -- a ratio of 0.93, which is what a
+            # non-slipping grip should give. 1.0 is used rather than 0.93 so the term never
+            # charges a *better*-than-measured grip: the cap may track the roll one-for-one, and
+            # anything beyond that is the fingers spinning it, which is the M6 behaviour this
+            # milestone exists to stop paying for.
+            no_slip_ratio=1.0,
+            # M8: below this much forearm travel in one control step, the forearm counts as
+            # stationary and any rotation the pads carried over that step is credited to the
+            # *fingers*. A metric, not a term -- nothing in the reward reads it.
+            #
+            # It exists because the reward is deliberately indifferent to *how* the cap is
+            # carried, and that indifference has to be observable or the first training run
+            # cannot be read. Measured on the scripted gaits, the finger share moves from 17%
+            # at a 90 deg roll range to 45% at 30 deg, so it is a real and sizeable quantity
+            # that `roll_travel` and `tracked_rotation` between them cannot express: both are
+            # totals, and neither says which joints produced the carry.
+            #
+            # 1 deg/step against a stroke that moves the forearm 9 deg/step at its fastest, so
+            # "still" means an order of magnitude below the stroke rate rather than exactly zero.
+            forearm_still_deg=1.0,
+            # M6: where the opposition factor saturates, in degrees of azimuth between the two
+            # grasp surfaces. 180 is wrong and the pregrasp fit measured why: at 180 one finger
+            # has to reach across to the far side of the cap, where the bottle neck is, and
+            # every grip/twist/release combination tried there hits the bottle (NOTES.md, M5).
+            # The fit settled on 150 and the gait it produces sits at 150.2 deg at the median,
+            # so the reward stops paying for more than the pose can deliver.
+            opposition_target_deg=150.0,
+            # M6: how close a pinch surface may come to the bottle before it is costed, in
+            # metres. The reference gait's closest approach over 192 steps is 3.41 mm (p1
+            # 3.75), so 2 mm is clear of it and the term is exactly zero on the trajectory it
+            # must not punish. Inside the margin it ramps linearly and keeps going past
+            # contact, since `cylinder_sdf` is signed: penetrating costs more than touching.
+            # Bounded at 5 so a bad early step cannot dominate the return.
+            bottle_margin=0.002,
+            # M6: the one remaining clip, and it only bounds a *cost*. Backward rotation is
+            # charged at the rate it happens so that losing ground is strictly worse than
+            # idling; this stops a numerical lurch from dominating an episode. Far past
+            # anything physical -- the reference gait's fastest forward step is 3.811 rad/s.
+            backdrive_clip=5.0,
             # PRD weights, with the sign of each cost moved from its definition into the weight
             # so the logged `reward/*` metrics read as signed contributions.
             scales=config_dict.create(
-                rotate=1.0,
-                # M5: 0.5 -> 0.15. At the pregrasp pose the old `reach` was 99.9% of the
+                # M6: replaces `rotate`, which paid for cap rotation however it was produced.
+                # `rotate` and `grasp` were *added*, so turning the cap badly and holding it
+                # well were alternatives the policy could choose between, and the arithmetic
+                # said to turn it badly: at 1200 steps an exploit grinding past the old clip
+                # returned 60.0 against 54.9 for the scripted gait, and NOTES.md M5 records
+                # every seed duly finding the exploit. `twist` is the product instead.
+                #
+                # M7: the second factor is no longer "rotation up to the grip's budget" but
+                # "rotation the forearm roll accounts for". Both conditions now have to hold at
+                # once -- the pinch must be closed *and* the hand must be the thing turning --
+                # which is the whole of the human motion in one term. A policy that grips
+                # perfectly and spins the cap with its fingers is paid nothing by it.
+                twist=1.0,
+                # M6: the pinch is the gate on `twist`, and it stays a dense term of its own so
+                # that a policy starting from the pregrasp pose has a gradient to follow before
+                # it has ever turned the cap -- which is the one real risk of gating rotation.
+                # 0.5 -> 0.15 at M5: at the pregrasp pose the old `reach` was 99.9% of the
                 # signal and parking for a whole episode returned 8.93 against ~21 for
-                # succeeding. With the sharper, opposition-gated term and this weight, parking
-                # returns ~1.2 against ~14 for succeeding.
+                # succeeding. Parking now returns ~9 against ~35 for gaiting.
                 grasp=0.15,
+                # M6: rotation the pinch did not produce. `(1 - pinch) * |d_theta|`, so a cap
+                # spun by a knuckle or flicked loose is charged for the whole of it while a
+                # clean pinch is charged for almost none. With `twist` at 1.0 the two cancel at
+                # `pinch = 0.2`: below that, turning the cap is worth less than leaving it
+                # alone.
+                slip=-0.25,
+                # M7 as `freewheel`, redefined and renamed at M8. It charged rotation the
+                # *forearm roll* did not produce, which meant it charged the fingers for
+                # contributing -- and the fingers are the stronger lever on this hand by 2.8x
+                # (`rh_FFJ3` sweeps the index pad -106.7 deg/rad about the cap axis against the
+                # roll joint's -38.5). It now charges rotation the *pads* did not carry: the
+                # grip closed, the cap turning, and no contact surface going with it, which is
+                # the cap sliding under the fingers.
+                #
+                # `slip` cannot see this -- the grip is good, so `(1 - pinch)` is near zero.
+                # Charged at twice `slip` because it is the specific behaviour being designed
+                # out, and gated on `pinch` so that a cap free-spinning after release is charged
+                # once, by `slip`, not twice.
+                grind=-0.5,
+                # M6: losing ground, charged at the rate it happens and unclipped up to
+                # `backdrive_clip`. The old `rotate` term clipped its own downside at -0.5 while
+                # paying up to +1.0, which made a cap shaken symmetrically back and forth worth
+                # +0.5 a cycle. Nothing was ever observed doing it -- but the reward paid for it.
+                backdrive=-1.0,
+                # M6: a pinch surface inside the bottle's margin. Nothing costed this before,
+                # and all three of the high-rotation recorded policies drive their grasp geoms
+                # into the bottle. The 150 deg opposition target is the other half of the fix.
+                bottle=-0.05,
                 # M5: the cost that makes the pinch two-fingered. `grasp` says what must touch
                 # the cap; without this nothing says what must not, and `rotate` quietly pays
                 # the middle finger to help turn it. Scaled so that all three idle tips in full
@@ -122,7 +226,12 @@ def default_config() -> config_dict.ConfigDict:
                 action_rate=-0.01,
                 torques=-1e-3,
                 joint_vel=-1e-4,
-                success=10.0,
+                # M6: 10.0 -> 100.0. At 10.0 the one-time bonus was worth 0.5 of return
+                # (10.0 * ctrl_dt) against ~31 for the dense term over a 1200-step episode --
+                # 1.6%, which shapes nothing, and NOTES.md listed it as an open question. At
+                # 100.0 it is 5.0, i.e. the last 60 deg before 4*pi is worth about two extra
+                # strokes. Still a tie-breaker rather than the objective.
+                success=100.0,
             ),
         ),
         # M2: `impl='jax'` cannot load this scene at all (no cylinder/mesh collisions), so warp
