@@ -4,6 +4,18 @@ Shadow Hand unscrewing a bottle cap by finger gaiting. Built from [`PRD.md`](PRD
 milestone at a time; deviations, measured numbers and open questions live in
 [`NOTES.md`](NOTES.md).
 
+![the trained policy, 5x slow](artifacts/m8_s1_cycle_slow.gif)
+
+The M8 policy at **5x slow**, `cap` camera, fingertip sites and contact forces drawn -- one
+stroke-and-regrip cycle out of the ~93 it does per episode. Re-simulated on CPU at substep
+resolution rather than stretching the 20 Hz saves, and it tracks the recorded GPU trajectory to
+0.14%. Full 60 s episode across all three cameras:
+
+```bash
+python3 scripts/eval.py logs/capturn-nominal-s1/checkpoints/.../000150732800 --save 4
+python3 scripts/render.py artifacts/m8_s1_ep00.npz --camera all --sites --contacts
+```
+
 Status: **M0** (scene), **M1** (open-loop feasibility), **M2** (MJX parity), **M3** (benchmark)
 and **M4** (the env) done. **`num_envs = 8192`**, `sim_dt = 0.00125` -- 3.52M sim-steps/s,
 **4,405x realtime** on an RTX PRO 6000 Blackwell (88,106 control-steps/s) once the fingertip
