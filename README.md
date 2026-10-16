@@ -16,123 +16,31 @@ python3 scripts/eval.py logs/capturn-nominal-s1/checkpoints/.../000150732800 --s
 python3 scripts/render.py artifacts/m8_s1_ep00.npz --camera all --sites --contacts
 ```
 
-**M5 (nominal training): criterion 1 passes, criterion 2 does not.** The scene and reward
-changes did most of what they were meant to -- parity improves 2.2% -> **0.2%**, warp reports
-**no overflow at all**, the pregrasp parking reward drops +0.978 -> **+0.038**, rotation falls
-~370 -> **155 deg/s** and penetration is clean at -0.309 mm. But measured with the reward's own
-`grasp_state` (which `eval.py` did not report until now), the policy is **not** doing a lateral
-pinch: thumb and index sit on the **same side** of the cap (opposition -0.627 median, opposed
-on 1.6% of steps), so the grasp term pays **0.000** and the policy is optimising rotation
-alone, hovering at 9.8/12.2 mm to stay inside the 20 mm grasp-loss bound on 100% of steps.
-The cause was structural -- `clip(opposition, 0, 1)` has no gradient below zero, so the term
-could not teach the grip it asks for. **Reshaping that one factor to `0.5 * (1 + opposition)`
-fixes it**: opposition goes -0.627 -> **+0.794** (opposed on 75% of steps), the grasp term
-0.000 -> **0.550**, and the gaps collapse 9.8/12.2 mm -> **2.9/0.3 mm**, so the hover is gone
-too. Penetration rises to -0.781 mm and `EPA_HORIZON` returns, both from making real contact.
-Across seeds it is **not yet reliable**: seed 1 reaches +0.600 opposition with all three
-fingertips regripping and contact lost on only 9% of steps, while seed 2 falls back to -0.463
-and a 9.6 mm index gap. Both score 100% on criterion 1. Two seeds; the third was lost to a
-preemption.
+## Where it got to
 
-**The two-finger pinch (thumb and index only) is implemented and is currently a regression**:
-of two seeds, one fails the task outright (0% success) and the other succeeds with a worse
-grasp than the three-finger config. The cause is measured -- the `idle_contact` cost penalises
-how *close* the unused fingers are rather than whether they are helping, and its tail is wide
-enough (0.368 at 10 mm) that the only way to satisfy it is to lift the whole hand off the cap.
-It would also penalise the M1 reference gait by -5.3 of return.
+| milestone | result |
+|---|---|
+| M0–M4 scene, gait, MJX parity, benchmark, env | done |
+| **PRD M5** nominal training | **pass** — 3 seeds, **100.00% ± 0.00** success over 1024 episodes each |
+| **PRD M6** sensitivity sweep | done — 8 of 9 DR parameter groups are free; bottle placement is fatal |
+| **PRD M7** DR training | **fail** — best policy **63.6%** against the >80% bar |
 
-Sharpening that cost (`idle_sharpness = 500`, validated first against the M1 gait, whose
-penalty falls to -0.37) **undoes the regression**: opposition back to +0.602, thumb/index gaps
-2.18/0.21 mm, penetration -0.198 mm and no warp overflow -- the best grasp numbers in the
-project. It does **not** achieve what the change was for: the middle finger backs off by 3.4 mm
-and stays the closest tip. Separating "resting on the cap" from "8 mm away" needs contact force,
-not a fingertip-site distance. Details in [`NOTES.md`](NOTES.md), M5.
+The trained policy turns the cap **+13,222 deg** (36.7 turns) per episode at net/gross 0.991,
+opposed on 100% of steps, with the cleanest contact in the project at **-0.170 mm** of
+penetration. Its own trajectory replays CPU-vs-warp at **0.0%**, so none of it is solver error.
 
-**M6 (reward design): the M5 reward ranked the reference gait last of five.** Scoring every
-trajectory in `artifacts/` with the live reward -- the hand-authored scripted gait and the four
-policies M5 produced -- the M5 reward puts the **flick exploit first** and the **scripted gait
-last**, by 2.3x; a policy that failed the task outright still outranks the gait by 2.1x. Two
-compounding causes: the terms were *added*, so turning the cap badly and holding it well were
-alternatives rather than one behaviour, and `rotate`'s per-step rate clip paid a bursty gait
-only **50.1%** of its own rotation while paying a continuous grinder all of it. Tightening that
-clip -- the obvious first move -- pays the gait 17%.
+It unscrews with **forearm pronation**, not finger-driven rotation: the index pad regrips ~90
+times an episode and 74.7% of joint travel is fingers, but `finger_carried_rotation` reads
+**0.0%** — no rotation is carried while the forearm is still. The reward pays either route by
+design, so this is the one it permits rather than the one it asks for.
 
-So rotation is now paid *by* the grasp and budgeted per grip:
-`twist = pinch * clip(d_theta, 0, stroke_budget_remaining) / dt`, with the 60 deg budget
-refilling only when a new grip begins. Two full turns then need at least twelve strokes, which
-makes "twist it several times" a consequence of the budget rather than a term asking for cycles.
-With `slip`, `backdrive` and a bottle-contact cost added, and opposition saturating at 150 deg
-(where the re-fitted pose puts the pinch) instead of 180 (where the bottle neck is), **the
-ranking inverts completely**: the scripted gait is the only trajectory with a positive return
-and the flick is last. `paid_rotation / cap_rotation_abs` is 100% for the gait and 7-11% for
-every policy. Nothing has trained yet. Details in [`NOTES.md`](NOTES.md), M6.
+M7 fails for a measurable reason: the hand's mount is fixed, so it cannot translate to follow a
+bottle that moves, and ±0.75 cm of placement takes success to 35.5% and 0.0%. DR training more
+than triples robustness (16.9% → 53.3%) without reaching the bar, and a from-scratch run at full
+range beats the PRD's prescribed curriculum by 10 points.
 
-One thing M6 explicitly does not fix: a person unscrews a cap with **forearm pronation**, and
-this hand has none -- the forearm is fixed and the wrist only flexes and deviates. The task as
-specified is finger-gaited in-hand rotation, and M6 shapes the grasp, the stroke and the cadence
-of the human motion but not its actuation.
-
-**M7 adds the pronation joint** (`rh_WRJ0`, -90 to +10 deg) and paid cap rotation only to the
-extent the forearm accounted for it. **M8 corrects that overcorrection**: measured at the
-contact points, the index MCP sweeps the index pad 106.7 deg around the cap axis per radian
-against the forearm roll's 38.5, so the finger is 2.8x the lever -- and M7 was charging all of it
-at -0.5. The reward now pays rotation the **two pads carried** without slipping, `min` over the
-pair, which admits fingers, forearm or both and still refuses slip and shear. The pure-finger
-gait goes from -0.256/s under M7 to **+0.165/s**.
-
-**M8 also re-fits the pregrasp**, which was gripping the cap's bottom lip -- the index pad at
-cap-frame z = **-5.5 mm** on a cap spanning ±8 mm, and 0.63 mm off the surface, so already
-loaded with nothing left to squeeze. The fitter was constraining fingertip *sites* while the
-reward measures the nearest point of the collision *geoms*, and its settled stage froze the
-hand's mount, the one variable that decides how far it sags (settled cost 470 -> **5.69** once
-freed). Both pads now sit near the cap's mid-band with ~3 mm of clearance, pad separation 148.9
-deg against a 149 target, and the reference gait touches the bottle on **0** of 264 steps where
-it used to on 91 of 220.
-
-**And `rh_WRJ0`'s range narrows 90 deg -> 45.** The reward is deliberately indifferent to which
-joints turn the cap, so the fingers' share has to come from the morphology. At 90 deg one stroke
-turns the cap 92 deg and the scripted gait carries 9% of its rotation on the fingers; at 45 deg
-it carries **26%**. 45 is the smallest range that keeps the trajectory clean -- below it the
-finger share is bought with slip rather than finger work. This did what an explicitly
-finger-sweeping gait could not: that gait buys 4 points of finger share for 11 points of slip,
-because gripping and sweeping draw on the same actuators. Parity is **0.0%** on both criteria.
-Details in [`NOTES.md`](NOTES.md), M8.
-
-**M8 trained, and the PRD's M5 is met.** One seed to 150M steps on an H200, 2.2 h at 18,771
-steps/s all-in. Over 1024 deterministic episodes the policy succeeds **100.00% +- 0.00** against
-the PRD's 80% bar, turning the cap **+13,222 deg** (36.7 turns) at net/gross **+0.991**, with
-opposition +0.919 and *opposed on 100% of steps*, both gaps under 0.3 mm, no drops, and the
-cleanest contact the project has trained: **-0.170 mm** of penetration against M1's -0.566. The
-policy's own trajectory replays CPU-vs-warp at **0.0%** and is timestep-converged at 0.0%, so
-none of it is solver error -- but it wants `njmax` 110 per world where the scripted gaits wanted
-84, which is the standing lesson in the other direction: *a trained policy loads the scene harder
-than any script used to size the buffers.*
-
-**The route is the forearm, and that is a judgement call rather than a measurement.** The policy
-clamps a lateral pinch, pronates to the stop, walks the index pad around the cap and repeats --
-~93 strokes an episode at ~1.5 Hz. 74.7% of joint travel is fingers and the index regrips
-**89.9 times per episode**, but the thumb regrips **0.00** times and `finger_carried_rotation`,
-the metric M8 added for exactly this question, reads **0.0%**: no rotation at all is carried
-while the forearm is still. Reviewed on video and called a pass -- the index regripping ~90 times
-an episode is the gait, and pronation is the hand using a joint M7 deliberately gave it. The
-reward pays fingers and forearm alike by design, so this is the route it permits, not the route
-it asks for. One seed, where the convention here is three.
-
-**PRD M6 and M7 are done, and M7 does not pass.** The sensitivity sweep says eight of the nine
-DR parameter groups are free -- friction, damping, actuator stiffness, armature and ±0.03 rad
-joint offsets all hold **100%** success across the PRD's full range, moving only the rate. The
-ninth is fatal: **±0.75 cm of bottle placement takes success to 35.5% and 0.0%**, and the hand's
-mount is fixed, so it cannot translate to follow a bottle that moves. DR training then buys a
-real but insufficient gain -- under true full DR the nominal policy scores **16.9%**, the
-0.25→0.5→1.0 curriculum **53.3%**, and a from-scratch run at full range **63.6%**, against the
-PRD's 80% bar. The cold run beating the curriculum by 10 points is the opposite of what the
-PRD's procedure assumes. Details in [`NOTES.md`](NOTES.md), PRD M6 and M7.
-
-A tooling note worth repeating here, because it produced two wrong conclusions before it was
-caught: `eval.py --dr-scale` only ever applied **observation noise and action delay**. The
-model-level randomisation never reached an eval env, so DR policies scored 100% on a test that
-was not asking the DR question. `eval.py --model-dr` now does it properly and both regimes are
-recorded in the summary JSON.
+Every number above, how it was measured, and what went wrong on the way are in
+[`NOTES.md`](NOTES.md).
 
 ## Setup (Mac, CPU)
 
