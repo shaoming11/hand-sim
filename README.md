@@ -118,6 +118,22 @@ an episode is the gait, and pronation is the hand using a joint M7 deliberately 
 reward pays fingers and forearm alike by design, so this is the route it permits, not the route
 it asks for. One seed, where the convention here is three.
 
+**PRD M6 and M7 are done, and M7 does not pass.** The sensitivity sweep says eight of the nine
+DR parameter groups are free -- friction, damping, actuator stiffness, armature and ±0.03 rad
+joint offsets all hold **100%** success across the PRD's full range, moving only the rate. The
+ninth is fatal: **±0.75 cm of bottle placement takes success to 35.5% and 0.0%**, and the hand's
+mount is fixed, so it cannot translate to follow a bottle that moves. DR training then buys a
+real but insufficient gain -- under true full DR the nominal policy scores **16.9%**, the
+0.25→0.5→1.0 curriculum **53.3%**, and a from-scratch run at full range **63.6%**, against the
+PRD's 80% bar. The cold run beating the curriculum by 10 points is the opposite of what the
+PRD's procedure assumes. Details in [`NOTES.md`](NOTES.md), PRD M6 and M7.
+
+A tooling note worth repeating here, because it produced two wrong conclusions before it was
+caught: `eval.py --dr-scale` only ever applied **observation noise and action delay**. The
+model-level randomisation never reached an eval env, so DR policies scored 100% on a test that
+was not asking the DR question. `eval.py --model-dr` now does it properly and both regimes are
+recorded in the summary JSON.
+
 ## Setup (Mac, CPU)
 
 ```bash
