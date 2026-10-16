@@ -92,6 +92,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--stochastic", action="store_true",
                     help="sample from the policy instead of taking its mean action")
     ap.add_argument("--impl", default=None, choices=["warp", "jax"])
+    ap.add_argument("--model-dr", type=float, default=None, metavar="SCALE",
+                    help="also randomize the MODEL per env (capturn/randomize.py) at this "
+                         "scale. --dr-scale alone is env-level only -- observation noise and "
+                         "action delay -- so a DR policy evaluated without this is not being "
+                         "asked the question the DR phase trained it on. Defaults to --dr-scale.")
     ap.add_argument("--dr-scale", type=float, default=0.0,
                     help="evaluate under env-level DR: observation noise and action delay")
     ap.add_argument("--env-override", default=None, help="JSON of env config overrides")
@@ -179,7 +184,8 @@ def sensor_slice(model, name: str) -> slice:
     return slice(adr, adr + int(model.sensor_dim[sid]))
 
 
-def rollout(env: CapTurn, policy, num_envs: int, seed: int) -> dict[str, np.ndarray]:
+def rollout(env: CapTurn, policy, num_envs: int, seed: int,
+            model_dr: float = 0.0) -> dict[str, np.ndarray]:
     """One episode per env, `episode_length` steps, no auto-reset.
 
     Returns, with a leading env axis: `qpos` (T+1 frames), and per-step `d_theta`, `angvel`,
@@ -199,7 +205,21 @@ def rollout(env: CapTurn, policy, num_envs: int, seed: int) -> dict[str, np.ndar
     del mujoco
 
     overflow_available = env._config.impl == "warp"
-    batched = brax_training.VmapWrapper(env)
+    if model_dr:
+        # PRD M7: the DR phase randomizes the model per env, and `eval.py` did not, so a DR
+        # policy used to be scored on observation noise alone. Playground's wrapper wants the
+        # rng already bound, the same way `train.py` does it.
+        import functools
+
+        from mujoco_playground import wrapper as pg_wrapper
+
+        from capturn import randomize
+        rand = functools.partial(randomize.domain_randomize,
+                                 rng=jax.random.split(jax.random.PRNGKey(seed + 1), num_envs),
+                                 scale=model_dr)
+        batched = pg_wrapper.BraxDomainRandomizationVmapWrapper(env, rand)
+    else:
+        batched = brax_training.VmapWrapper(env)
 
     def one_step(carry, _):
         state, rng, alive = carry
@@ -514,13 +534,14 @@ def main(argv: list[str] | None = None) -> None:
           + (f"   dr_scale={args.dr_scale:g}" if args.dr_scale else ""))
     print()
 
+    model_dr = args.model_dr if args.model_dr is not None else args.dr_scale
     chunks = []
     done = 0
     while done < args.episodes:
         size = min(batch, args.episodes - done)
         if size != batch:
             env = build_env(args, size)
-        chunks.append(rollout(env, policy, size, args.seed + done))
+        chunks.append(rollout(env, policy, size, args.seed + done, model_dr=model_dr))
         done += size
         print(f"  {done}/{args.episodes} episodes", flush=True)
     # Every array is per-episode and concatenates; `overflow` is a single accumulated bitmask
@@ -534,6 +555,9 @@ def main(argv: list[str] | None = None) -> None:
     summary["checkpoint"] = ckpt.as_posix()
     summary["step"] = step
     summary["dr_scale"] = args.dr_scale
+    # Recorded separately because they are different regimes: `dr_scale` is observation
+    # noise and action delay, `model_dr` is the per-env model randomisation.
+    summary["model_dr"] = model_dr
     summary["deterministic"] = not args.stochastic
 
     # ------------------------------------------------------------------ save + penetration

@@ -3038,6 +3038,111 @@ grasp-loss termination firing at one geometry and not another) are guesses until
 
 ---
 
+## PRD M7 — domain randomisation
+
+`capturn/randomize.py` (the PRD's table, nine model-level parameter groups) plus the env-level
+hooks that already existed. Ran 2026-10-15 as a chain on the H200: the nominal policy probed
+under DR, then the curriculum 0.25 -> 0.5 -> 1.0 fine-tuning from seed 1's final checkpoint,
+then a from-scratch baseline at 1.0, then evaluations of all three. About 9 h of GPU.
+
+**The criterion is not met.** The PRD asks for success above 80% at `dr_scale 1.0`. The best
+policy reaches **63.6%**.
+
+### `eval.py --dr-scale` was not measuring DR, and that invalidated the first read
+
+Found while writing this up, and worth recording because it produced two wrong conclusions
+before it was caught. `eval.py --dr-scale X` sets `noise_config.level` and
+`action_delay.enabled` -- **observation noise and action delay only**. It never called
+`randomize.py`, so no friction, damping, actuator, joint-offset or **bottle-placement**
+randomisation ever reached an eval env. Training's own eval loop *does* randomise the model,
+because Brax wraps the eval env with the same `randomization_fn`.
+
+So the two sets of numbers measure different regimes, and comparing across them is meaningless:
+
+| policy | `--dr-scale 1.0` only (env noise) | **true full DR** (`--model-dr 1.0`) |
+|---|---|---|
+| nominal, M8 seed 1 | 66.5% | **16.9%** |
+| curriculum 0.25->0.5->1.0 | 100.0% | **53.3%** |
+| from-scratch at 1.0 | 100.0% | **63.6%** |
+
+The first column says every DR policy is perfect and the nominal policy is mediocre. The second
+says the nominal policy nearly cannot do the task and DR triples its robustness without getting
+it to the bar. `eval.py` now takes `--model-dr SCALE`, defaulting to `--dr-scale`, and records
+both in the summary JSON so a result cannot be read as the wrong regime again.
+
+### The three-way comparison the PRD asks for
+
+All at `dr_scale 1.0` with the model randomised, 1024 deterministic episodes:
+
+| policy | success | net rotation | p10 / p90 |
+|---|---|---|---|
+| nominal (M8 seed 1) | **16.89% +- 1.17** | +696 deg | -51 / +2,739 |
+| curriculum 0.25 -> 0.5 -> 1.0 | **53.32% +- 1.56** | +3,925 deg | -0.0 / +9,475 |
+| from-scratch at 1.0 | **63.57% +- 1.50** | +4,136 deg | +0.0 / +8,923 |
+
+Two readings, in order of confidence.
+
+**DR training works, and the curriculum is not the way to do it.** 16.9% -> 53.3% is a real
+gain, more than tripling what the nominal policy manages. But the from-scratch baseline beats
+the curriculum by **10.3 points** on the same measurement, which is the opposite of what the
+PRD's procedure assumes -- it prescribes fine-tuning through 0.25 and 0.5 precisely to avoid
+training at full range cold. Here the cold run is better. The M6 sweep says why this is
+plausible: the binding parameter is bottle placement, the hand's mount is fixed so it cannot
+translate to follow the bottle, and a policy that spent 150M steps perfecting one geometry has
+a specialisation to unlearn that a fresh policy never acquired.
+
+**The curriculum degrades smoothly with scale and the grip goes first.** Across the
+fine-tunes, training-time success falls 99.8% -> 96.5% -> 60.8%, and pinch falls
+0.834 -> 0.762 -> **0.492** with opposition 0.816 -> 0.782 -> 0.660. At full range the policies
+are holding the cap roughly half as firmly as at quarter range. Whatever is failing, it is
+failing at the grasp.
+
+### DR costs nothing at nominal geometry
+
+The curriculum policy on the unperturbed scene: **100.00%** over 256 episodes, +10,524 deg,
+penetration **-0.185 mm**, and **no overflow flags**. Robustness was bought without losing the
+task, which is the one unambiguous good news in this milestone.
+
+### One number moved that has never moved before
+
+`finger_carried_rotation` has read 0.0% for every nominal policy in this project, across three
+seeds. Under DR it rises with scale: **0.87% -> 2.55% -> 3.89%**, and the from-scratch baseline
+is highest at **4.16%**. These are still tiny, and none of them is finger gaiting. But DR is the
+only intervention so far that has moved the number off zero at all, which is a lead worth
+following: perturbing the geometry appears to make the forearm-only strategy less reliable than
+it is on the fixed scene.
+
+### The DR policy's own trajectory, replayed on CPU
+
+The M8 lesson was that a trained policy must be parity-checked on *its own* trajectory, not on
+a scripted gait. Done here too, on the curriculum policy at nominal geometry -- a DR-randomised
+model differs per env, so a CPU replay of a randomised rollout would not be reproducible, and
+the nominal scene is the one geometry both backends agree on by construction:
+
+| | |
+|---|---|
+| M2.1 | CPU **+10,504.44 deg** vs warp **+10,527.57** -- **0.2%**, worst gap along the trajectory 0.3% |
+| M2.2 | halving `sim_dt`: **0.2%** (worst gap 0.2%) |
+| M2.3 | no overflow, solver 8 of 50, penetration CPU -0.406 mm / warp -0.221 mm |
+
+PASS on all three, slightly looser than seed 1's 0.0% and far inside the 10% tolerance. **But
+the buffer margin is now thin**: this trajectory wants `naconmax` **46** per world against the
+configured 48, where the M8 nominal policy wanted 40 and the scripted gaits 32. `njmax` wants
+124 against 150. The progression 32 -> 40 -> 46 against a fixed 48 is the thing to watch -- the
+next geometry or reward change that loads contacts harder will overflow it silently, exactly
+the failure mode M6 caught once already.
+
+### Physics under full DR is strained
+
+Every full-DR evaluation raised `EPA_HORIZON` and `ITERATIONS`, and the nominal policy also
+raised `LS_ITERATIONS` -- against **no flags at all** at nominal geometry. The success rates
+above are therefore measured in a regime where the solver is hitting its caps, which is a
+caveat on their precision and not on their ordering (the three are separated by far more than
+the solver noise could plausibly account for). Raising `iterations`/`ls_iterations` for DR work
+is the obvious next move, and M3 recorded that it is free.
+
+---
+
 ## Open questions
 
 - Does the Warp backend honour `dof_solref`/`dof_solimp`? If not, the cap-creep fix above is
